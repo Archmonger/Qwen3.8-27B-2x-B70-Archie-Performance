@@ -1,8 +1,8 @@
 # Placeholder — INT4 profile
 
-This directory is **intentionally empty**. It holds the shape of the future
-Qwen3.8-27B INT4 profile and nothing else, so that nothing unverified can be
-booted from this repo.
+This directory holds **no runnable config** — only these READMEs, which describe
+the shape of the future Qwen3.8-27B INT4 profile — so that nothing unverified can
+be booted from this repo.
 
 `../../setup.sh --profile int4` refuses with an explanation instead of starting a
 container.

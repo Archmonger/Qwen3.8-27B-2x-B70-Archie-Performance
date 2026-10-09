@@ -7,5 +7,5 @@ drafter's contract with the target is hidden-state taps (`target_layer_ids`,
 exactly — weight quantization does not change the activations the projector
 consumes.
 
-Until the INT4 profile is implemented this directory is deliberately empty.
-See `../README.md`.
+Until the INT4 profile is implemented this directory holds no config file, only
+this note. See `../README.md`.

@@ -96,7 +96,7 @@ case "$PROFILE" in
   int4)
     cat >&2 <<'EOF'
 [setup] FATAL: the Qwen3.8-27B INT4 profile is a placeholder and is not
-[setup]        implemented. profiles/int4/ is intentionally empty so nothing
+[setup]        implemented. profiles/int4/ holds no runnable config, so nothing
 [setup]        unverified can be booted from this repo.
 [setup]
 [setup]        See "Qwen3.8-27B-INT4 Configuration (placeholder)" in README.md
