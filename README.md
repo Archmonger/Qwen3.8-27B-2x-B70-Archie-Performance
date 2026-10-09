@@ -6,10 +6,11 @@ stand up a container byte-comparable to the configuration that produced the reco
 numbers below: the image recipe, the launcher, the per-profile config, the drafter
 config patch, and the harnesses that re-measure and re-attest it.
 
-- **FP8 profile: implemented, deployed, soak-passed.** `sudo ./setup.sh`
+- **FP8 profile: implemented, deployed, soak-passed.** `sudo ./setup.sh --profile fp8`
 - **INT4 profile: placeholder.** No config, and no unbootable config either — only
-  READMEs describing the shape it will take. See
-  [profiles/int4/README.md](profiles/int4/README.md).
+  READMEs describing the shape it will take, and
+  `sudo ./setup.sh --profile int4` refuses with an explanation rather than booting
+  something unverified. See [profiles/int4/README.md](profiles/int4/README.md).
 
 Every configuration detail lives in
 [docs/configuration.md](docs/configuration.md): the pinned image and its digests, the
@@ -53,10 +54,20 @@ git clone git@github.com:Archmonger/Qwen3.8-27B-2x-B70-Archie-Performance.git
 cd Qwen3.8-27B-2x-B70-Archie-Performance
 
 ./scripts/download-models.sh --models-dir /mnt/cache/models   # 33 GB, public, pinned
-sudo ./setup.sh                                               # build + start + verify
+
+# FP8 — the implemented profile: build + start + verify
+sudo ./setup.sh --profile fp8
+
+# INT4 — a placeholder: exits 3 with an explanation instead of starting a
+# container, because profiles/int4/ holds no runnable config
+sudo ./setup.sh --profile int4
 ```
 
-Then:
+`--profile` selects between the two paths above: `fp8` is both the argument and the
+default, while `int4` has no version that boots — it is refused at profile dispatch,
+before any build or start, so nothing unverified can come up from this repo.
+
+Once the FP8 profile is up:
 
 ```bash
 curl -s http://127.0.0.1:8103/v1/models
@@ -64,9 +75,9 @@ curl -s http://127.0.0.1:8103/v1/chat/completions -H 'Content-Type: application/
   -d '{"model":"secondary","messages":[{"role":"user","content":"What is the capital of France?"}],"max_tokens":32}'
 ```
 
-Useful flags: `--dry-run` (preflight + resolved plan, changes nothing),
-`--rebuild`, `--no-start`, `--b70-bdfs`, `--models-dir`, `--cache-dir`,
-`--run-dir`. `-h` for all.
+Useful flags: `--profile` (`fp8` | `int4`), `--dry-run` (preflight + resolved plan,
+changes nothing), `--rebuild`, `--no-start`, `--b70-bdfs`, `--models-dir`,
+`--cache-dir`, `--run-dir`. `-h` for all.
 
 `setup.sh` is idempotent and fails closed: it refuses to start the container if the
 graph ceiling does not equal `MAX_NUM_SEQS x (1 + NUM_SPEC_TOKENS)`, if a dynamic
