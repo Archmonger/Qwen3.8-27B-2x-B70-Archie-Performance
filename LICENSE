@@ -1,0 +1,13 @@
+Apache License 2.0
+
+The code in this repository is provided under the Apache License 2.0
+(https://www.apache.org/licenses/LICENSE-2.0).
+
+This repo assembles upstream components that carry their own licenses and does not
+relicense them: vLLM (Apache 2.0), intel/llm-scaler and intel/omix (see Intel's
+image terms), the Qwen3.8 checkpoints (see the model card), and the DSpark drafter
+(Apache 2.0).
+
+No model weights are committed here. The repo pins Hugging Face repo ids, commit
+hashes, and one sha256 for the drafter tensor file. Check the model cards before
+re-hosting weights or redistributing outputs.
