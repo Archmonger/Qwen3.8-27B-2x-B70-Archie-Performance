@@ -85,50 +85,65 @@ by whoever set this repo up — mostly single runs — so they exist to show the
 numbers travel with the repo, not to re-litigate the A/B. Read the note under the
 table before quoting a batched row.
 
+Every row was produced with its harness's canonical parameters, which are now
+part of the invocation rather than an implicit default — see the note under the
+table. Use `scripts/bench/run-all.sh` to reproduce the whole table in one go.
+
 | metric | recorded | reproduced | how |
 |---|---|---|---|
-| **conc=10 aggregate (the operating point)** | **227.13** | **197** (4 reps, 193-202; earlier session 231.52) | `conc.py --cells 10:30` |
-| conc=12 aggregate | 221.50 | 195-197 (earlier session 223.26) | `conc.py` |
-| conc=9 / conc=8 aggregate | 212.42 / 202.56 | 180-185 / 173-183 (earlier session 215.79 / 205.21) | `conc.py` |
-| conc=1 aggregate | 42.6 | 43.34 | `conc.py` |
-| C1 counting probe (`"1 2"`, 16 tok) | ~152 | **151.12-151.98** (peak 152.65) | `probe.py --prompt "1 2"` |
-| natural 512-token probe | ~59 | 50.21-58.92 | `probe.py` |
+| **conc=10 aggregate (the operating point)** | **227.13** | **229.59 / 230.47** | `conc.py --cells 10:30 --max-tokens 256` |
+| conc=12 aggregate | 221.50 | 228.81 / 230.41 | `conc.py --cells 12:30 --max-tokens 256` |
+| conc=9 / conc=8 aggregate | 212.42 / 202.56 | 206.01-209.50 / 202.64-205.11 | `conc.py --max-tokens 256` |
+| conc=1 aggregate | 42.6 | 43.95-43.97 | `conc.py --cells 1:6 --max-tokens 256` |
+| C1 counting probe (`"1 2"`, 16 tok) | ~152 | **151.12-151.98** (peak 152.65) | `probe.py --prompt "1 2" --max-tokens 16 --iters 10` |
+| natural 512-token probe | ~59 | **58.69-58.92** (peak 58.94) | `probe.py --max-tokens 96 --iters 6` |
 | realistic suite `tok_s_1_100_after_ttft` | — | **40.21-41.58** median (3 runs) | `suite.py` |
 | suite TTFT | — | 161-189 ms median | `suite.py` |
 | acceptance length (C1 / natural) | **7.500** (26/169) / **3.000** (256/512) | **7.500 (26/169) / 3.000 (256/512)** — exact | `acceptance.sh` |
 | correctness | 30/30 per arm | 15/15 | `correctness.sh` |
 | serving surface | 5/5 | 5/5 | `surface.py` |
 | graph capture cost | 0.58 GiB/rank, ~6 s | 0.58-0.60 GiB/rank, 6 s | engine log |
+| configured capture ladder | 13 sizes to 80 | `[1,2,4,8,16,24,32,40,48,56,64,72,80]` | engine log (`cudagraph_capture_sizes`) |
 | soak | 6/6 cycles, 3894 s, 0 wedges, 0 restarts | — | `soak.sh` |
 
-**Read the batched rows with care.** Two measurements in this table reproduce
-exactly and two drift:
+**`--max-tokens` is part of the metric, not a knob — and an earlier revision of
+this table got it wrong.** `conc.py`'s `aggregate_tok_s` divides counted
+`completion_tokens` by wall time, but wall time also pays for prefill. The prompt
+here is a fixed ~243 tokens, so that uncounted prefill cost is amortised over
+`max_tokens`: at `conc=10`, 96 tokens/request reads ~13% below 256 on the *same
+boot*, while `conc=1` moves only ~4% because prefix caching makes prefill nearly
+free for a single stream. That asymmetry is what made it look like a host problem.
 
-- Exact: C1 (`151.12-151.98` against a recorded ~152) and the acceptance
-  fingerprint (`26/169 = 7.500`, `256/512 = 3.000`, digit for digit). Those are a
-  function of the drafter, the target, k and the graph path, so they are the
-  evidence that this repo boots the same engine.
-- Drifted: every batched `conc.py` cell came in ~13% under its recorded value on
-  the verification run, **uniformly across conc=8/9/10/12**, on a boot where C1
-  was correct. A uniform depression across the whole curve that leaves single-stream
-  untouched is a host-side condition, not a config difference — a wrong ceiling
-  would gut one cell, not shift the curve. The engine itself was provably healthy
-  during it: 0 preemptions, 0 KV usage, 0 restarts, graphs captured at 9 shapes.
+The table above originally reported the batched cells at **197** against a
+recorded **227.13** and called the gap an unidentified ~13% host-side depression.
+That diagnosis was wrong, and the numbers in this paragraph are what caused it:
+the verification run invoked `conc.py` directly, which fell through to a
+`--max-tokens` **default of 96**, while the recorded A/B and both scripted callers
+(`run-all.sh`, `soak.sh`) used **256**. Re-running one boot with alternating arm
+order — the only change being the flag:
 
-So: use the **recorded** column as the configuration's result, and treat the
-**reproduced** column as "this repo stands the engine up correctly on this box",
-not as a re-measurement. The batched cells move with box state; the single-stream
-and acceptance figures do not.
+| `--max-tokens` | 96 | 256 | recorded |
+|---|---|---|---|
+| conc=10 | 193.23-202.94 | **229.16-231.64** | 227.13 |
+| conc=1 | 42.37 | 44.32 | 42.6 |
 
-The cause of the batched shift is **not identified**, and one candidate has been
-ruled out: an orphaned root-owned `intel_gpu_top` held the GPU perf/OA unit open
-through the verification runs, which looked like a plausible culprit — but it
-started Oct 3, i.e. it was also running during the Oct 7 run that produced
-227.13, so it cannot explain the delta. It is recorded here so the next person
-does not spend an afternoon on it. Before quoting a batched number, note what else
-was on the host and how long the box had been up; this host drifted ~5% per 10
-boots even in the paired A/Bs, and the batched metric is the one that shows it.
-| soak | 6/6 cycles, 3894 s, 0 wedges, 0 restarts | — | `soak.sh` |
+The same boot reproduces the recorded column at 256. Nothing was wrong with the
+engine, the image, or the host: 0 preemptions, 0 KV usage, 0 restarts, correct
+graph capture throughout. `conc.py` now defaults to 256, prints `max_tokens` with
+every cell, and refuses a non-canonical value unless you pass
+`--confirm-noncanonical`, so this comparison can fail loudly instead of quietly
+measuring a different metric. The natural-probe row had the same failure mode
+(quoted 50.21 from a `--max-tokens 512` run against a recorded ~59 taken at 96)
+and is now quoted at the canonical 96.
+
+**A metric that moves ~15% on an unrecorded parameter is not a metric.** Quote the
+harness, the cells, *and* `max_tokens` with any aggregate number.
+
+Dead end, kept so nobody re-walks it: an orphaned root-owned `intel_gpu_top`
+holding the GPU perf/OA unit open was blamed for the depression, then cleared —
+it started Oct 3, so it was also running during the Oct 7 run that recorded
+227.13 and cannot explain a delta between the two. The real cause was in the
+harness all along.
 
 The acceptance windows reproducing to the exact draft and accepted counts
 (`C1 26 169 7.500`, `NAT 256 512 3.000`) is the strongest signal that this repo
@@ -159,13 +174,20 @@ number.
 
 ### Spread and what is not comparable
 
-A single live engine has real run-to-run spread, and it is metric-dependent: on
-the graphed configuration measured here, C1 sat in **151.12-151.98** (peak 152.65)
-while the natural 512-token probe moved **50.21-58.92** — so the natural metric
-needs repeats and anything under ~3 tok/s on it is noise. The batched cells moved
-as a group by ~13% between sessions (see the note under the headline table). The
-box also drifts ~5% per 10 boots, which is why real A/Bs are paired with
-alternating arm order rather than run once each.
+A single live engine has real run-to-run spread, and it is metric-dependent. On
+the graphed configuration measured here, and with every harness at its canonical
+parameters, C1 sat in **151.12-151.98** (peak 152.65), the natural 512-token probe
+in **58.69-58.92** (peak 58.94), and conc=10 at `--max-tokens 256` in
+**229.16-231.64** across reps on one boot. So genuine session-to-session spread on
+this configuration is a couple of percent, not double digits — anything under ~3
+tok/s on the natural metric needs repeats, and the box drifts ~5% per 10 boots,
+which is why real A/Bs are paired with alternating arm order rather than run once
+each.
+
+Two apparent "regressions" documented above were **not** spread at all: both were
+this repo measuring at a different harness parameter than the number it was
+compared against. Before attributing a gap to noise, check that both sides used
+the same `max_tokens`, the same cells, and the same probe.
 
 The **47.70-55.44 C1 / 21.37-24.85 natural** spread figures that appeared in
 earlier notes here are **eager-era**, k=4, graphs off — the same mix-up the
@@ -399,11 +421,13 @@ The measured host: CachyOS, kernel `7.2.7-1-cachyos`, `intel-compute-runtime
 ./scripts/soak.sh --cycles 6 --cycle-seconds 600
 ```
 
-`falsify/run-all.sh` mutates a synthetic engine log, the profile file, and the
-spec-decode counters, and requires every guard to fire. Run it after editing any
-guard, and pass `CONTAINER=<name>` to cross-check the attestation regexes against a
-real engine log (vLLM has changed that repr before, and a regex that stops matching
-looks exactly like a correctly failing check).
+`falsify/run-all.sh` runs four harnesses — the attestation rules against a
+synthetic engine log, the `setup.sh` preflight gates, the acceptance formula, and
+the `conc.py` `--max-tokens` guard — and requires every one of them to fire while
+the clean baseline stays green. Run it after editing any guard, and pass
+`CONTAINER=<name>` to cross-check the attestation regexes against a real engine log
+(vLLM has changed that repr before, and a regex that stops matching looks exactly
+like a correctly failing check).
 
 `verify.sh` reads the **engine's own printed config** from the container log, not
 your env file, and checks that the capture-size ladder actually *contains* 80 —
