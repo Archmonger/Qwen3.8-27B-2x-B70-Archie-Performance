@@ -17,6 +17,12 @@ false parity conclusion on this hardware.
 Engine-log "Avg generation throughput" is a different (aggregate) metric and is
 not comparable to this one.
 
+The suite is checkpoint-neutral: `suite_id` in the JSON records which checkpoint
+the prompts were originally built against (an INT4 AutoRound build), but the
+prompts themselves are ordinary cold prompts, so both profiles here measure with
+this one file and are comparable to each other. Only compare a suite number to
+another number taken with the same prompts.
+
 The prompt list is read from the JSON, not embedded here, so the file is the
 single source of truth and a swapped suite cannot silently diverge from the
 harness. The 86.93 / 94.58 figures quoted inside the JSON's own description come
