@@ -206,7 +206,8 @@ fi
 # Space-separated escape hatch for one-off flags, e.g.
 #   EXTRA_VLLM_ARGS="--language-model-only --mamba-ssm-cache-dtype float16"
 # (`read` returns non-zero on an empty value, hence the `|| true` under set -e.)
-# This is where the graph ceiling lives; see README "Runtime flags".
+# This is where the graph ceiling lives; see "Runtime flags" in
+# docs/configuration.md.
 read -r -a PASS_ARGS <<<"${EXTRA_VLLM_ARGS:-}" || true
 
 serve() {

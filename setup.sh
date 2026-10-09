@@ -99,9 +99,9 @@ case "$PROFILE" in
 [setup]        implemented. profiles/int4/ holds no runnable config, so nothing
 [setup]        unverified can be booted from this repo.
 [setup]
-[setup]        See "Qwen3.8-27B-INT4 Configuration (placeholder)" in README.md
-[setup]        for the shape the profile will take, and docs/ for the INT4
-[setup]        measurements that constrain it.
+[setup]        See profiles/int4/README.md for the shape the profile will take and
+[setup]        the constraints it must respect, and docs/measurement-notes.md for
+[setup]        why the INT4 figures from the investigation are not reusable here.
 EOF
     exit 3
     ;;

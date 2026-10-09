@@ -27,7 +27,8 @@ silently share a tag.
 
 1. **Select the checkpoint by what the engine can load, not by the directory
    name.** `quant_method` is the contract, and it has been observed to disagree
-   with the name. `auto-round` has no entry in `0.26`'s quantization registry
+   with the name. One INT4 checkpoint in this family declares `auto-round`, which
+   has no entry in `0.26`'s quantization registry
    (`get_quantization_config("auto_round")` raises `ValueError: Invalid
    quantization method: auto-round`); `gptq`, `gptq_marlin`, and `auto_gptq` all
    resolve. Verify by running each `config.json` through vLLM's own resolver —
@@ -39,14 +40,19 @@ silently share a tag.
    comparison.** Otherwise the A/B measures V2-vs-V1 as much as spec-vs-none.
 4. **INT4 buys KV headroom, not necessarily speed.** ~19.7 GiB KV vs FP8's 9.97,
    but the drafter was fine-tuned on FP8 hidden states, so acceptance drops.
-5. **Re-derive the graph ceiling** — `MAX_NUM_SEQS x (1 + NUM_SPEC_TOKENS)` —
+5. **The same drafter is legitimate for INT4.** Its contract with the target is the
+   hidden-state taps — `target_layer_ids [4,16,28,40,52]` of 64, `hidden_size` 5120,
+   `vocab_size` 248320 — which the INT4 and FP8 text configs match exactly. C1
+   acceptance was identical (7.500) across both targets.
+6. **Re-derive the graph ceiling** — `MAX_NUM_SEQS x (1 + NUM_SPEC_TOKENS)` —
    and **re-soak**. The oneCCL IPC-handle wedge is a TP2 property of the platform,
    not of the quantization, and `CCL_SYCL_ALLREDUCE_TMP_BUF=1` must stay set.
-6. **Correctness is not optional.** The graph-stride defect is invisible to
+7. **Correctness is not optional.** The graph-stride defect is invisible to
    throughput and acceptance metrics. Any INT4 run with graphs on must pass
    `../../scripts/bench/correctness.sh`, and until the stride behaviour is
    characterised for the INT4 target, treat `k=7` + `FULL_DECODE_ONLY` + no
    schedule as the only known-safe shape.
 
-See the "Qwen3.8-27B-INT4 Recorded Performance Metrics" and
-"Qwen3.8-27B-INT4 Configuration (placeholder)" sections of the README.
+The empty metrics table lives in the README's "Qwen3.8-27B-INT4 Recorded Performance
+Metrics" section; why the investigation's INT4 figures cannot be dropped into it is
+[../../docs/measurement-notes.md#the-int4-placeholder-cells](../../docs/measurement-notes.md#the-int4-placeholder-cells).
