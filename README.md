@@ -116,11 +116,17 @@ exactly and two drift:
 
 So: use the **recorded** column as the configuration's result, and treat the
 **reproduced** column as "this repo stands the engine up correctly on this box",
-not as a re-measurement. The batched cell moves with box state; the single-stream
-and acceptance figures do not. Before quoting a batched number, check what else
-was on the host — an orphaned `intel_gpu_top` held the GPU perf/OA unit open
-through the verification runs, which is a plausible cause of the uniform shift and
-is **not** ruled out.
+not as a re-measurement. The batched cells move with box state; the single-stream
+and acceptance figures do not.
+
+The cause of the batched shift is **not identified**, and one candidate has been
+ruled out: an orphaned root-owned `intel_gpu_top` held the GPU perf/OA unit open
+through the verification runs, which looked like a plausible culprit — but it
+started Oct 3, i.e. it was also running during the Oct 7 run that produced
+227.13, so it cannot explain the delta. It is recorded here so the next person
+does not spend an afternoon on it. Before quoting a batched number, note what else
+was on the host and how long the box had been up; this host drifted ~5% per 10
+boots even in the paired A/Bs, and the batched metric is the one that shows it.
 | soak | 6/6 cycles, 3894 s, 0 wedges, 0 restarts | — | `soak.sh` |
 
 The acceptance windows reproducing to the exact draft and accepted counts
