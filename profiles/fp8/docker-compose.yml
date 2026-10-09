@@ -1,0 +1,84 @@
+# Qwen3.8-27B-FP8 + DSpark + XPU graphs on 2x Arc Pro B70.
+#
+# Stand this up with ./setup.sh (from the repo root) -- it does the preflight,
+# builds the image, generates the filtered /dev/dri/by-path directory plus the
+# resolved device-node file, and starts the container. Bring it up by hand only if
+# you already know why; note the SECOND env file, which setup.sh generates and which
+# carries the card/render node names compose interpolates below:
+#
+#   ./setup.sh --profile fp8          # first time, or after editing image/Dockerfile
+#   docker compose --env-file profiles/fp8/fp8.env \
+#                  --env-file profiles/fp8/runstate/devices.env \
+#                  -f profiles/fp8/docker-compose.yml up -d
+#
+# Without the second file the devices: entries render blank and container creation
+# fails -- which is the intended outcome, since guessing a render node from a stale
+# value is how you end up mounting the wrong GPU.
+#
+# Deliberately NOT part of the host's /srv/docker compose project: this stack
+# is standalone so it cannot be started or stopped by an `include:` from
+# elsewhere, and so nothing here can touch the production engine.
+
+name: qwen38-arch-fp8
+
+services:
+  fp8:
+    image: ${IMAGE}
+    container_name: ${CONTAINER_NAME:-vllm-arch-fp8}
+    restart: unless-stopped
+    # serve.sh replaces the image entrypoint: it sources oneAPI/CCL, sets the
+    # XPU + oneCCL environment, warms the engine, then supervises vllm.
+    entrypoint: ["/bin/bash", "/serve.sh"]
+    # host: vLLM binds PORT directly, and oneCCL's bootstrap uses ephemeral
+    # ports between the two TP workers.
+    network_mode: host
+    ipc: host
+    shm_size: 32g
+    devices:
+      # [HW] Exactly the two B70 nodes, nothing else. Resolved from B70_BDFS by
+      # setup.sh. The A310 (i915) and the RTX 2000 Ada must stay out -- oneCCL
+      # aborts in fill_device_fds on foreign entries.
+      - /dev/dri/${RANK0_CARD}:/dev/dri/${RANK0_CARD}
+      - /dev/dri/${RANK0_RENDER}:/dev/dri/${RANK0_RENDER}
+      - /dev/dri/${RANK1_CARD}:/dev/dri/${RANK1_CARD}
+      - /dev/dri/${RANK1_RENDER}:/dev/dri/${RANK1_RENDER}
+    volumes:
+      # The filtered by-path dir setup.sh generated. NOT /dev/dri/by-path from
+      # the host: that also links the A310 and the NVIDIA card, and oneCCL
+      # aborts on the dangling entries before CCL tuning ever matters.
+      - ${RUNSTATE_DIR}/dri-by-path:/dev/dri/by-path:ro
+      - ${MODELS_DIR}/${TARGET_DIR}:/models/target:ro
+      - ${MODELS_DIR}/${DRAFTER_DIR}:/models/drafter:ro
+      - ../../scripts/serve.sh:/serve.sh:ro
+      # Compiler/runtime caches on the big pool. On the boot drive these fill it
+      # during Inductor/Triton autotune.
+      - ${CACHE_DIR}/vllm:/mnt/cache/.cache/vllm
+      - ${CACHE_DIR}/torchinductor:/mnt/cache/.cache/torchinductor
+      - ${CACHE_DIR}/triton:/mnt/cache/.cache/triton
+    environment:
+      - VLLM_CACHE_ROOT=/mnt/cache/.cache/vllm
+      - TORCHINDUCTOR_CACHE_DIR=/mnt/cache/.cache/torchinductor
+      - TRITON_CACHE_DIR=/mnt/cache/.cache/triton
+      # Models are on disk; never let the container reach for the hub.
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      # --- everything below comes from profiles/fp8/fp8.env ---
+      - PORT=${PORT}
+      - SERVED_NAME=${SERVED_NAME}
+      - TP_SIZE=${TP_SIZE}
+      - MAX_MODEL_LEN=${MAX_MODEL_LEN}
+      - MAX_NUM_SEQS=${MAX_NUM_SEQS}
+      - MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS}
+      - GPU_MEM_UTIL=${GPU_MEM_UTIL}
+      - KV_OFFLOAD_SIZE=${KV_OFFLOAD_SIZE}
+      - KV_CACHE_DTYPE=${KV_CACHE_DTYPE}
+      - SPEC=${SPEC}
+      - SPEC_METHOD=${SPEC_METHOD}
+      - NUM_SPEC_TOKENS=${NUM_SPEC_TOKENS}
+      - XPU_GRAPH=${XPU_GRAPH}
+      - COMPILE=${COMPILE}
+      - PREFIX_CACHE=${PREFIX_CACHE}
+      - EXTRA_VLLM_ARGS=${EXTRA_VLLM_ARGS}
+      - CCL_NO_P2P=${CCL_NO_P2P}
+      - CCL_SYCL_ALLREDUCE_TMP_BUF=${CCL_SYCL_ALLREDUCE_TMP_BUF}
+      - WARMUP=${WARMUP}
