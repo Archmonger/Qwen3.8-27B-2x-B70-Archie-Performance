@@ -78,11 +78,12 @@ configuration, so they are comparable with each other.
 
 ### Headline
 
-Two columns, because they mean different things. **Recorded** is the paired A/B that
-established the configuration. **Reproduced** is this repo's own harnesses run
-against the live engine afterwards — single runs, so expect the documented ~14%
-spread; they exist to show the numbers travel with the repo, not to re-litigate the
-A/B.
+Two columns, because they mean different things. **Recorded** is the paired A/B
+(2 reps per arm, alternating boot order) that established the configuration.
+**Reproduced** is this repo's own harnesses run against the live engine afterwards
+by whoever set this repo up — mostly single runs — so they exist to show the
+numbers travel with the repo, not to re-litigate the A/B. Read the note under the
+table before quoting a batched row.
 
 | metric | recorded | reproduced | how |
 |---|---|---|---|
@@ -158,10 +159,18 @@ number.
 
 ### Spread and what is not comparable
 
-A single live engine has **~14% peak-to-trough spread** on both probes (C1
-47.70-55.44, natural 21.37-24.85) and the box drifts ~5% per 10 boots. Anything
-under ~3 tok/s on the natural metric needs repeats, and real A/Bs are paired with
-alternating arm order.
+A single live engine has real run-to-run spread, and it is metric-dependent: on
+the graphed configuration measured here, C1 sat in **151.12-151.98** (peak 152.65)
+while the natural 512-token probe moved **50.21-58.92** — so the natural metric
+needs repeats and anything under ~3 tok/s on it is noise. The batched cells moved
+as a group by ~13% between sessions (see the note under the headline table). The
+box also drifts ~5% per 10 boots, which is why real A/Bs are paired with
+alternating arm order rather than run once each.
+
+The **47.70-55.44 C1 / 21.37-24.85 natural** spread figures that appeared in
+earlier notes here are **eager-era**, k=4, graphs off — the same mix-up the
+paragraph above warns about, reproduced inside this README's own text. Quote the
+era with the number.
 
 Two published numbers on this hardware are **not** parity targets and are quoted
 here only so nobody re-derives them as a regression:
