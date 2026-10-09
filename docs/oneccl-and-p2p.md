@@ -96,9 +96,19 @@ and separating them lets a graph run be attributed between capture and sampler.
 
 ## Boot drift is real and will find you
 
-The box drifts ~5% per 10 boots on the natural probe, and a single live engine
-shows ~14% peak-to-trough spread. Every A/B in these docs is **paired** with
-alternating arm order for exactly this reason. Two claims died once drift was
-controlled: an "env knob win" and a "graphs are slower" reading. If a delta is
-under ~3 tok/s on the natural metric, it is not a result until it survives paired
-repeats.
+The box drifts ~5% per 10 boots on the natural probe. Every A/B in these docs is
+**paired** with alternating arm order for exactly this reason. Two claims died once
+drift was controlled: an "env knob win" and a "graphs are slower" reading. If a
+delta is under ~3 tok/s on the natural metric, it is not a result until it survives
+paired repeats.
+
+An earlier revision of this file also claimed "a single live engine shows ~14%
+peak-to-trough spread". That figure is not trusted and has been dropped: it predates
+the discovery that `conc.py`'s `--max-tokens` default silently changed the metric,
+and a mismatched `max_tokens` produces exactly this kind of large, uniform,
+reproducible pseudo-spread. Reps on one boot with every harness pinned to its
+canonical parameter varied by ~1% (natural 58.69-58.92, conc=10 at 256 tokens
+229.16-231.64), but that is reps-on-one-boot, not a validated session-to-session
+noise floor, so it is not offered as a threshold either. Measure the floor for the
+comparison you are actually making, with the identical config as a calibration arm,
+and check that both sides used the same `max_tokens` before calling anything noise.

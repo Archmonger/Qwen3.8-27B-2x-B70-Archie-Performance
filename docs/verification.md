@@ -105,11 +105,13 @@ Both are fixed with **guards**, not just patches, so the class of bug stays clos
   config as a calibration arm and use its spread. A hardcoded 3% once promoted a
   +3.4% artifact to "falsified" on a probe whose real spread was much larger.
   Compute the floor **per probe**: pooling the counting probe with the natural
-  prompt gave a 90% floor that muted a real +38%. With every harness pinned to its
-  canonical parameters, genuine session-to-session spread on this configuration is
-  a couple of percent — C1 151.12-151.98, natural 58.69-58.92, conc=10 at 256
-  tokens 229.16-231.64 — so the double-digit "spread" quoted in earlier revisions
-  of these docs was mostly harness mismatch, not noise.
+  prompt gave a 90% floor that muted a real +38%. Note that any historical spread
+  figure predating the `max_tokens` finding is suspect, since a mismatched
+  `max_tokens` produces a large, uniform, perfectly reproducible pseudo-spread.
+  Reps **on one boot** with every harness canonical spanned ~1% (C1 151.12-151.98,
+  natural 58.69-58.92, conc=10 at 256 tokens 229.16-231.64); that is a within-boot
+  figure and is deliberately not offered as a session-to-session floor, because it
+  holds boot, box and cache state fixed while this host drifts ~5% per 10 boots.
 - **State the metric with every number.** `tok_s_1_100_after_ttft` from
   `scripts/bench/suite.py`, `aggregate_tok_s` from `conc.py`, and
   `median_tok_s_after_ttft` from `probe.py` are three different things. Engine-log

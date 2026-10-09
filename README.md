@@ -174,25 +174,25 @@ number.
 
 ### Spread and what is not comparable
 
-A single live engine has real run-to-run spread, and it is metric-dependent. On
-the graphed configuration measured here, and with every harness at its canonical
-parameters, C1 sat in **151.12-151.98** (peak 152.65), the natural 512-token probe
-in **58.69-58.92** (peak 58.94), and conc=10 at `--max-tokens 256` in
-**229.16-231.64** across reps on one boot. So genuine session-to-session spread on
-this configuration is a couple of percent, not double digits — anything under ~3
-tok/s on the natural metric needs repeats, and the box drifts ~5% per 10 boots,
-which is why real A/Bs are paired with alternating arm order rather than run once
-each.
+Run-to-run spread is real and metric-dependent, but much smaller than this README
+previously claimed. With every harness at its canonical parameter, repeated reps
+**on one boot** gave C1 **151.12-151.98** (peak 152.65), the natural 512-token probe
+**58.69-58.92**, and conc=10 at `--max-tokens 256` **229.16-231.64** — a ~1% range.
 
-Two apparent "regressions" documented above were **not** spread at all: both were
-this repo measuring at a different harness parameter than the number it was
-compared against. Before attributing a gap to noise, check that both sides used
-the same `max_tokens`, the same cells, and the same probe.
+That is reps-on-one-boot, which is *not* a session-to-session noise floor and must
+not be quoted as one: it holds the boot, the box state and the cache state fixed, and
+this host is documented to drift ~5% per 10 boots. Measure the floor for the
+comparison you are actually making, by booting the identical config as a calibration
+arm. Anything under ~3 tok/s on the natural metric needs repeats, and real A/Bs are
+paired with alternating arm order rather than run once each.
 
-The **47.70-55.44 C1 / 21.37-24.85 natural** spread figures that appeared in
-earlier notes here are **eager-era**, k=4, graphs off — the same mix-up the
-paragraph above warns about, reproduced inside this README's own text. Quote the
-era with the number.
+Two numbers in this README's own history were passed off as spread and were not
+spread at all: the ~13% batched gap (a `max_tokens` mismatch, above) and the
+**47.70-55.44 C1 / 21.37-24.85 natural** range quoted by an earlier revision, which
+is **eager-era**, k=4, graphs off — the era-mixing that "One correction to a figure
+that circulated earlier" warns about, reproduced inside this README's own text.
+Before attributing a gap to noise, check that both sides used the same `max_tokens`,
+the same cells, the same probe, and the same era.
 
 Two published numbers on this hardware are **not** parity targets and are quoted
 here only so nobody re-derives them as a regression:

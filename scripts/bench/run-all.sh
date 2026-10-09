@@ -12,7 +12,11 @@
 #  * The box drifts ~5% per 10 boots on the natural probe. Any claimed delta
 #    under ~3 tok/s on the natural metric needs repeats, and a real A/B must boot
 #    both arms back-to-back with the order alternated.
-#  * A 14% peak-to-trough spread on a single live engine is normal.
+#  * --max-tokens is part of the metric, not a knob: aggregate_tok_s moves ~15%
+#    between 96 and 256 at conc=10 while single stream barely moves, because the
+#    uncounted prefill of a fixed prompt is amortised over max_tokens. This sweep
+#    always passes 256, which is what every recorded number used; conc.py refuses a
+#    different value unless you pass --confirm-noncanonical.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
