@@ -159,10 +159,53 @@ from conc=8 when the operating point is conc=10; (b) a note claiming conc=12 nee
 a ceiling of 96 ignored that `MAX_NUM_SEQS` means a 12-request burst never forms a
 12-batch; (c) an earlier note claimed static `k=7` "wedges the GPU at concurrency
 >= 6", which kept deployments parked at conc=8 — W53 ran `k=7` at concurrency 8
-across four boots with no wedge, and the soak since ran it at the cap for 3894 s,
-so that claim is withdrawn. All three were caught by measuring, not by reasoning.
+across four boots with no wedge, and the soak has since run it oversubscribed
+(conc=16 then conc=8) for 3894 s, so that claim is withdrawn. All three were
+caught by measuring, not by reasoning.
 
 **Rules of thumb:** set `max_cudagraph_capture_size = MAX_NUM_SEQS x (1+k)`, and
 always measure the cell at the `MAX_NUM_SEQS` cap. `setup.sh` enforces the first
 rule and refuses to start if it is broken; `verify.sh` re-checks that the capture
 ladder actually *contains* the value, since echoing the number is not proof.
+
+### Two passes, two counts — do not quote one of them alone
+
+The engine log shows **two** capture passes, so a claim about "how many shapes" is
+meaningless without saying which:
+
+| pass | log line | shapes |
+|---|---|---|
+| target model | `Capturing CUDA graphs (FULL)` | 10 |
+| dspark drafter | `Capturing dspark CUDA graphs (FULL)` | 9 |
+
+Both are built from the **13-size** configured ladder
+`[1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80]` that the engine prints as
+`cudagraph_capture_sizes`. Neither progress bar counts that ladder directly, so
+quoting `9/9` as "the ladder has 9 sizes" is wrong, and so is quoting 13 as "13
+graphs were captured". `verify.sh` asserts on the configured ladder because that
+is the list the saturated batch size has to appear in. Total cost is 0.58-0.60
+GiB per rank for both passes together, in ~6 s.
+
+## Open
+
+Soak status: the deployed config (static `k=7`, `FULL_DECODE_ONLY`, ceiling 80,
+ladder `[1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80]`) completed **6 of 6
+sustained load cycles with 0 wedges and 0 generation timeouts** (~3894 s of
+continuous conc=16/conc=8 load, TP2, `restart_count` stayed 0). That is
+like-for-like with the W27 mitigation baseline (0/6).
+
+**What that does and does not prove.** The wedge is rare and load-shaped, so 6
+clean cycles *lower* the risk rather than eliminating it; absence of a wedge in a
+soak is not evidence of its absence in production. Keep
+`CCL_SYCL_ALLREDUCE_TMP_BUF=1` (`scripts/serve.sh`) — it is the only mitigation
+found (W27 AR 0/6 vs 4/5 same-run controls, Fisher p=0.0152), and the wedge does
+not self-heal (53/53 restarts=0): a wedged engine keeps answering `/health` 200
+while generating nothing, which is exactly why the soak gates on generated tokens
+rather than on liveness.
+
+Harness: `scripts/soak.sh --cycles 6 --cycle-seconds 600`. It treats **only
+rc=124** as a stall and aborts inconclusive on an operator kill (rc=143), so a
+PASS can only come from cycles that ran to their sustained duration. An earlier
+version recorded its own kill as a timeout and reported a healthy engine as
+broken; the reverse failure — a PASS tallied from a run the harness itself ended
+— is the one actually worth guarding against.

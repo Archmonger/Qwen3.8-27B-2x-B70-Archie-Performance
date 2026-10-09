@@ -70,6 +70,23 @@ Both are fixed with **guards**, not just patches, so the class of bug stays clos
    reporting PASS. A PASS can only come from cycles that actually ran to duration.
    (`timeout --preserve-status` is deliberately *not* used — it would report 143 on
    a genuine timeout and destroy the 124-vs-143 distinction.)
+3. **A `--max-tokens` default silently changed the metric, and the engine was blamed.**
+   `conc.py` computed `aggregate_tok_s` as counted `completion_tokens / wall`, but
+   wall time also pays for prefill. Its default was 96 while every recorded number —
+   and both scripted callers — used 256, so a hand-run sweep compared 96 against a
+   256 record and came out ~13% low. Because the fixed ~243-token prompt makes the
+   uncounted prefill cost amortise over `max_tokens`, the loss appeared at `conc=10`
+   and barely at `conc=1` (prefix caching makes prefill nearly free for one stream),
+   which is exactly the signature of a "host-side condition". Verified on one boot
+   with alternating arm order, changing only the flag: conc=10 **193.23-202.94** at
+   96 vs **229.16-231.64** at 256, against a recorded 227.13. An out-of-sample point
+   at 160 interpolated to ~211 and measured 214.82.
+   Now: `CANONICAL_MAX_TOKENS = 256` is the default, `max_tokens` is printed with
+   every cell and in `--json`, and a non-canonical value exits 3 unless
+   `--confirm-noncanonical` is passed. Proven able to fail both ways by
+   `scripts/falsify/conc-cases.sh`, including a mutation check that the harness goes
+   red if the guard is deleted. The same class of error also inflated the natural
+   probe gap (50.21 quoted at `--max-tokens 512` against a ~59 record taken at 96).
 
 ## Measurement rules
 
@@ -77,13 +94,22 @@ Both are fixed with **guards**, not just patches, so the class of bug stays clos
   is always at the 10-request cap; measuring at conc=8 hid a 38% batched loss
   across two deploys.
 - **Pair your A/Bs and alternate arm order.** ~5% drift per 10 boots on the natural
-  probe; a single live engine has ~14% peak-to-trough spread. Two claims died once
-  order was controlled.
+  probe. Two claims died once order was controlled.
+- **Pin and echo every harness parameter that moves the number.** `--max-tokens`
+  changes `aggregate_tok_s` by ~15% (rule 3 above), so a comparison where the two
+  sides used different values is not a comparison. This is a third category of
+  error, distinct from noise and from drift: the measurement was *precise*, it
+  measured a different metric. Before attributing a gap to spread, confirm both
+  sides used the same `max_tokens`, the same cells, and the same probe.
 - **Measure the noise floor instead of picking a threshold.** Boot the identical
   config as a calibration arm and use its spread. A hardcoded 3% once promoted a
-  +3.4% artifact to "falsified" on a probe whose real spread is 14.3%. Compute the
-  floor **per probe**: pooling the ~44-sample counting probe with the ~19-sample
-  natural prompt gave a 90% floor that muted a real +38%.
+  +3.4% artifact to "falsified" on a probe whose real spread was much larger.
+  Compute the floor **per probe**: pooling the counting probe with the natural
+  prompt gave a 90% floor that muted a real +38%. With every harness pinned to its
+  canonical parameters, genuine session-to-session spread on this configuration is
+  a couple of percent — C1 151.12-151.98, natural 58.69-58.92, conc=10 at 256
+  tokens 229.16-231.64 — so the double-digit "spread" quoted in earlier revisions
+  of these docs was mostly harness mismatch, not noise.
 - **State the metric with every number.** `tok_s_1_100_after_ttft` from
   `scripts/bench/suite.py`, `aggregate_tok_s` from `conc.py`, and
   `median_tok_s_after_ttft` from `probe.py` are three different things. Engine-log
