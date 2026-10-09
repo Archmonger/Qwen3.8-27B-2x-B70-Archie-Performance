@@ -20,11 +20,25 @@ a busy engine is ever in.
 Prompts vary by an (i % 8) prefix so prefix caching cannot make later requests
 artificially cheap -- with caching on, a constant prompt otherwise flatters whichever
 arm runs second.
+
+--max-tokens IS PART OF THE METRIC, NOT A KNOB. aggregate_tok_s divides counted
+completion_tokens by wall time, and wall time also pays for prefill. With the fixed
+~243-token prompt here, that uncounted prefill cost is amortised over max_tokens, so
+the same boot at 96 reads materially slower at high concurrency than at 256 (measured
+on one boot, alternating order: conc10 193-203 at 96 vs 229-232 at 256, while conc1
+moved only 4% because prefix caching makes prefill nearly free for a single stream).
+This is why the depression once looked like a host fault: it moved the batched cells
+and left single-stream alone. So the number is only comparable to another number
+taken at the same max_tokens, and max_tokens is therefore printed with every cell and
+defaults to 256, the value the recorded README column used. Deviating requires an
+explicit --confirm-noncanonical, which exists so exploration stays possible without
+letting an accidental default produce an unattributable headline number.
 """
 import argparse
 import json
 import os
 import statistics
+import sys
 import threading
 import time
 import urllib.request
@@ -35,16 +49,46 @@ _PROMPT_FILE = os.environ.get(
 with open(_PROMPT_FILE) as _f:
     PROMPT = _f.read().strip()
 
+# The value every recorded number in the README was produced with. It is a metric
+# definition, not a default to be tuned -- see the module docstring. Both scripted
+# callers (scripts/bench/run-all.sh, scripts/soak.sh) pass exactly this, so only a
+# hand-run conc.py can drift from it, which is precisely what happened once.
+CANONICAL_MAX_TOKENS = 256
+
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, required=True)
     ap.add_argument("--model", required=True)
-    ap.add_argument("--max-tokens", type=int, default=96)
+    ap.add_argument("--max-tokens", type=int, default=CANONICAL_MAX_TOKENS,
+                    help=f"tokens/request; part of the metric definition. "
+                         f"Default and canonical value is {CANONICAL_MAX_TOKENS}; any "
+                         f"other value also needs --confirm-noncanonical.")
+    ap.add_argument("--confirm-noncanonical", action="store_true",
+                    help="required to run at a --max-tokens other than "
+                         f"{CANONICAL_MAX_TOKENS}; results then must not be compared "
+                         "against the recorded column")
     ap.add_argument("--cells", default="1:6,8:24",
                     help="conc:total pairs, comma separated")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
+
+    if a.max_tokens != CANONICAL_MAX_TOKENS and not a.confirm_noncanonical:
+        print(
+            f"conc.py: --max-tokens {a.max_tokens} is not the canonical "
+            f"{CANONICAL_MAX_TOKENS}.\n"
+            f"  aggregate_tok_s moves ~15% on this parameter, so a number taken at "
+            f"any\n  other value is NOT comparable to the recorded README column and "
+            f"must not be\n  quoted as one. This is the trap that once read as a "
+            f"'13% host-side\n  regression' on a boot that was provably correct.\n"
+            f"  Exploring?  add --confirm-noncanonical\n"
+            f"  Measuring? use the default (drop --max-tokens) or run "
+            f"scripts/bench/run-all.sh",
+            file=sys.stderr)
+        # 3, deliberately not 2: the warmup-failure path below also returns 2, and
+        # a caller must be able to tell "the guard rejected this run" from "the
+        # engine was unreachable". Same reason soak.sh keeps 124 and 143 apart.
+        return 3
     url = f"http://127.0.0.1:{a.port}/v1/chat/completions"
 
     def gen(i):
@@ -108,9 +152,17 @@ def main():
                               "wall_s": round(wall, 1),
                               "tokens": int(agg * wall),
                               "median_req_s": round(statistics.median(per), 2) if per else None}
+    # Echo max_tokens on every cell. It changes the number by ~15%, so a result
+    # without it attached cannot be audited later -- which is how a 96-token run
+    # ended up being compared against a 256-token record.
+    tag = f"max_tokens={a.max_tokens}" + (
+        "" if a.max_tokens == CANONICAL_MAX_TOKENS else " (NON-CANONICAL)")
     if a.json:
-        print(json.dumps(out))
+        print(json.dumps({"max_tokens": a.max_tokens,
+                          "canonical_max_tokens": a.max_tokens == CANONICAL_MAX_TOKENS,
+                          "cells": out}))
     else:
+        print(f"  [{tag}] cells={a.cells}")
         for k, v in out.items():
             print(f"  {k}: {v['aggregate_tok_s']:6.2f} tok/s  "
                   f"({v['tokens']} toks in {v['wall_s']}s, median req {v['median_req_s']}s)")

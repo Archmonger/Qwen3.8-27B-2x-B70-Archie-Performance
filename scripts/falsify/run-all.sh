@@ -15,7 +15,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 fails=0
-for h in "$HERE"/verify-cases.sh "$HERE"/setup-guards.sh "$HERE"/acceptance-cases.sh; do
+for h in "$HERE"/verify-cases.sh "$HERE"/setup-guards.sh "$HERE"/acceptance-cases.sh \
+         "$HERE"/conc-cases.sh; do
   echo
   echo "################ $(basename "$h")"
   if timeout 1800 bash "$h"; then
