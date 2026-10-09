@@ -53,9 +53,9 @@ broken one through, and `cmd | grep -q .` under `pipefail`, where grep's early e
 SIGPIPEs `cmd` and the pipeline reports failure for content that exists.
 `acceptance.sh` tests the predicate positively and says why.
 
-## Two harness bugs that misreported a *healthy* engine
+## Harness bugs that misreported a *healthy* engine
 
-Both are fixed with **guards**, not just patches, so the class of bug stays closed:
+All three are fixed with **guards**, not just patches, so the class of bug stays closed:
 
 1. **Correctness reported 12/18 on a good engine.** The prompts were piped through
    `while IFS= read -r`, which split the one multi-line prompt

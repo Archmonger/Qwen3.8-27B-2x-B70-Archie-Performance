@@ -2,9 +2,9 @@
 
 Reproducible vLLM serving on **2x Intel Arc Pro B70 (TP=2, XPU)** with DSpark
 speculative decoding and FULL decode graphs. This repo holds everything needed to
-stand up a container byte-comparable to the run that produced the recorded numbers
-below: the image recipe, the launcher, the per-profile config, the drafter config
-patch, and the harnesses that re-measure and re-attest it.
+stand up a container byte-comparable to the configuration that produced the recorded
+numbers below: the image recipe, the launcher, the per-profile config, the drafter
+config patch, and the harnesses that re-measure and re-attest it.
 
 - **FP8 profile: implemented, deployed, soak-passed.** `sudo ./setup.sh`
 - **INT4 profile: placeholder.** No config, and no unbootable config either — only
@@ -87,33 +87,41 @@ with `FULL_DECODE_ONLY` graphs at ceiling 80. Full configuration:
 [docs/configuration.md](docs/configuration.md). All numbers below are from the same
 configuration, so they are comparable with each other.
 
-| metric | recorded | reproduced | how |
-|---|---|---|---|
-| **conc=10 aggregate (the operating point)** | **227.13** | **229.59 / 230.47** | `conc.py --cells 10:30 --max-tokens 256` |
-| conc=12 aggregate | 221.50 | 228.81 / 230.41 | `conc.py --cells 12:30 --max-tokens 256` |
-| conc=9 / conc=8 aggregate | 212.42 / 202.56 | 206.01-209.50 / 202.64-205.11 | `conc.py --max-tokens 256` |
-| conc=1 aggregate | 42.6 | 43.95-43.97 | `conc.py --cells 1:6 --max-tokens 256` |
-| C1 counting probe (`"1 2"`, 16 tok) | ~152 | **151.12-151.98** (peak 152.65) | `probe.py --prompt "1 2" --max-tokens 16 --iters 10` |
-| natural 512-token probe | ~59 | **58.69-58.92** (peak 58.94) | `probe.py --max-tokens 96 --iters 6` |
-| realistic suite `tok_s_1_100_after_ttft` | — | **40.21-41.58** median (3 runs) | `suite.py` |
-| suite TTFT | — | 161-189 ms median | `suite.py` |
-| acceptance length (C1 / natural) | **7.500** (26/169) / **3.000** (256/512) | **7.500 (26/169) / 3.000 (256/512)** — exact | `acceptance.sh` |
-| correctness | 30/30 per arm | 15/15 | `correctness.sh` |
-| serving surface | 5/5 | 5/5 | `surface.py` |
-| graph capture cost | 0.58 GiB/rank, ~6 s | 0.58-0.60 GiB/rank, 6 s | engine log |
-| configured capture ladder | 13 sizes to 80 | `[1,2,4,8,16,24,32,40,48,56,64,72,80]` | engine log (`cudagraph_capture_sizes`) |
-| soak | 6/6 cycles, 3894 s, 0 wedges, 0 restarts | — | `soak.sh` |
+Every cell is a measurement taken on this host with the configuration above. Where a
+row carries several recordings they are separated by `·`; `/` separates probe windows
+that were measured together. Values quoted as a range are repeated reps, not a
+confidence interval, and the reps behind each row are not interchangeable protocols —
+[docs/measurement-notes.md](docs/measurement-notes.md) says which recording came from
+which harness and which are within-boot reps.
+
+| metric | recorded | how |
+|---|---|---|
+| **conc=10 aggregate (the operating point)** | **227.13 · 229.59 · 230.47** | `conc.py --cells 10:30 --max-tokens 256` |
+| conc=12 aggregate | 221.50 · 228.81 · 230.41 | `conc.py --cells 12:30 --max-tokens 256` |
+| conc=9 aggregate | 212.42 · 206.01-209.50 | `conc.py --max-tokens 256` |
+| conc=8 aggregate | 202.56 · 202.64-205.11 | `conc.py --max-tokens 256` |
+| conc=1 aggregate | 42.6 · 43.95-43.97 | `conc.py --cells 1:6 --max-tokens 256` |
+| C1 counting probe (`"1 2"`, 16 tok) | **151.12-151.98** (peak 152.65) | `probe.py --prompt "1 2" --max-tokens 16 --iters 10` |
+| natural 512-token probe | **58.69-58.92** (peak 58.94) | `probe.py --max-tokens 96 --iters 6` |
+| realistic suite `tok_s_1_100_after_ttft` | **40.21-41.58** median (3 runs) | `suite.py` |
+| suite TTFT | 161-189 ms median | `suite.py` |
+| acceptance length (C1 / natural) | **7.500** (26/169) / **3.000** (256/512) — identical on every recording | `acceptance.sh` |
+| correctness | 15/15 · 30/30 per graphs-on A/B arm | `correctness.sh` |
+| serving surface | 5/5 | `surface.py` |
+| graph capture cost | 0.58-0.60 GiB/rank, 6 s | engine log |
+| configured capture ladder | `[1,2,4,8,16,24,32,40,48,56,64,72,80]` (13 sizes to 80) | engine log (`cudagraph_capture_sizes`) |
+| soak | 6/6 cycles, 3894 s, 0 wedges, 0 restarts | `soak.sh` |
 
 `--max-tokens` is part of the metric, not a knob: `aggregate_tok_s` moves ~15%
-between 96 and 256 at `conc=10`, and an earlier revision of this table mistook that
-gap for a host-side depression. Why the two columns differ, what the spread actually
-is, which published numbers on this hardware are **not** parity targets, and which
-figures in this project's history were eager-era and are not comparable:
+between 96 and 256 at `conc=10`, which is what once made a correct engine look ~13%
+depressed. What the spread actually is, which third-party numbers on this hardware are
+**not** parity targets, and which figures from the investigation were eager-era and are
+not comparable to anything above:
 [docs/measurement-notes.md](docs/measurement-notes.md).
 
 ## Qwen3.8-27B-INT4 Recorded Performance Metrics
 
-> **PLACEHOLDER — no INT4 result is published from this repo yet.**
+> **PLACEHOLDER — this repo holds no INT4 measurement.**
 >
 > Reserved for the INT4 profile's numbers, in the same shape and with the same metric
 > names as the FP8 table above. The `how` column pins every parameter that moves the
@@ -123,7 +131,8 @@ figures in this project's history were eager-era and are not comparable:
 > | metric | value | how |
 > |---|---|---|
 > | conc=10 aggregate | *TBD* | `conc.py --cells 10:30 --max-tokens 256` |
-> | conc=9 / conc=8 aggregate | *TBD* | `conc.py --max-tokens 256` |
+> | conc=9 aggregate | *TBD* | `conc.py --max-tokens 256` |
+> | conc=8 aggregate | *TBD* | `conc.py --max-tokens 256` |
 > | C1 counting probe | *TBD* | `probe.py --prompt "1 2" --max-tokens 16 --iters 10` |
 > | natural 512-token probe | *TBD* | `probe.py --max-tokens 96 --iters 6` |
 > | realistic suite `tok_s_1_100_after_ttft` | *TBD* | `suite.py` |
@@ -144,7 +153,7 @@ figures in this project's history were eager-era and are not comparable:
 | doc | about |
 |---|---|
 | [docs/configuration.md](docs/configuration.md) | the whole measured config: pinned image + digests, model/KV quantization, patches, runtime flags, env vars, serve knobs, container and devices |
-| [docs/measurement-notes.md](docs/measurement-notes.md) | how to read the metrics table: the `max_tokens` mismatch, spread, eras, and the numbers that are not parity targets |
+| [docs/measurement-notes.md](docs/measurement-notes.md) | how to read the metrics table: where each recording comes from, the `max_tokens` mismatch, spread, eras, and the third-party numbers that are not parity targets |
 | [docs/verification.md](docs/verification.md) | what each check proves, and the harness bugs that misreported healthy engines |
 | [docs/cudagraph-stride-defect.md](docs/cudagraph-stride-defect.md) | the graphs x DSpark defect, six falsified theories, the rejected patch, and the ceiling bug |
 | [docs/driver-overlay.md](docs/driver-overlay.md) | why the image is rebuilt from the pinned base |

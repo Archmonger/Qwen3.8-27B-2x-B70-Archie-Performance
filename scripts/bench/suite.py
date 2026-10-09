@@ -27,8 +27,8 @@ The prompt list is read from the JSON, not embedded here, so the file is the
 single source of truth and a swapped suite cannot silently diverge from the
 harness. The 86.93 / 94.58 figures quoted inside the JSON's own description come
 from a DIFFERENT checkpoint on a patched vLLM fork and are not a parity target
-for this deployment -- see "Why two published numbers are not comparable" in the
-README.
+for this deployment -- see "Third-party numbers on this hardware that are not
+parity targets" in docs/measurement-notes.md.
 """
 import json, os, statistics, sys, time, urllib.request
 

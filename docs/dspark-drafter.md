@@ -25,7 +25,7 @@ headroom (KV 9.97 GiB, max concurrency for the full 262k context 1.46x — INT4 
 Quote the era with the throughput figures from that comparison (suite 15.67 vs
 13.56 tok/s): both were measured **eager, k=4, no graphs**, which is not the
 deployed shape. The acceptance ratio is the transferable finding; the absolute
-numbers describe a configuration this repo no longer describes. The graphed
+numbers describe the eager k=4 shape, not the one this repo ships. The graphed
 configuration's own suite metric is ~40-42 tok/s — see the README table.
 
 The pairing is legitimate across quantizations because the drafter's contract with
