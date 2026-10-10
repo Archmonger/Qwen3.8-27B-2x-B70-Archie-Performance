@@ -8,31 +8,34 @@ findings.
 
 ## Where each recording comes from
 
-The single `recorded` column mixes protocols on purpose — every value is a measurement
-of this configuration on this host — but the reps are not interchangeable, so do not
-pool them into one mean or treat a range as a confidence interval:
+Every cell in the README's grid is the **median of three reps of a harness that is in
+this repo**, taken in one session against one running container, on an engine that had
+been attested first (`scripts/verify.sh`). One number per cell by design: no ranges, no
+pooled means, and every value traceable to a script someone else can run.
 
-- **The establishing paired A/B** (2 reps per arm, alternating boot order) produced the
-  first value in each `conc.py` row: conc=10 **227.13**, conc=12 **221.50**, conc=9
-  212.42, conc=8 202.56, conc=1 42.6, and the 30/30 correctness-per-arm rows. This is
-  the arm that decided the configuration, and it is the number to compare a change
-  against. The soak row came from the same investigation phase rather than from an A/B
-  arm.
-- **Harness re-runs against the live container** produced the remaining batched values
-  (229.59, 230.47 at conc=10; 228.81, 230.41 at conc=12) and the ranges at conc=9,
-  conc=8, and conc=1. These were taken after the container was stood up from this
-  repo's own files, so their job is to show the configuration produces the same
-  numbers from a clean build — they are single or few runs, not additional A/B arms.
-- **Within-boot reps** produced the C1 **151.12-151.98** (peak 152.65), natural
-  **58.69-58.92** (peak 58.94), and suite **40.21-41.58** (3 runs) rows, plus the
-  229.16-231.64 conc=10 range quoted in the `--max-tokens` section below. These hold
-  the boot, box state, and cache state fixed, so they measure rep noise only — see
-  the spread section.
+That is a deliberate change from how the first version of this table was assembled, and
+the reason for the change is worth keeping. The earlier table mixed three different
+kinds of number in one column — an establishing paired A/B, later harness re-runs, and
+within-boot reps — and while each was defensible alone, the column as a whole could not
+be re-produced by any single command. Some cells came from scratch scripts that were
+never committed. So when the harnesses changed, several published cells could not be
+traced to shipped code at all. The rule now is:
 
-The establishing A/B logged the two `probe.py` rows only approximately (~152 C1, ~59
-natural), each within 0.5% of the rep peaks (152.65, 58.94), so those rows carry the
-precise within-boot reps rather than a merged cell that would imply the approximations
-were measurements of the same kind.
+- **A published number comes from a harness in `scripts/`,** not from an ad-hoc script.
+  If the measurement needed a new script, the script ships.
+- **Three reps per cell, median published.** Rep count and per-rep spread are recorded
+  alongside, so a cell that quietly rests on one good rep is visible.
+- **The engine is attested in the same session** as the measurement, not in an earlier
+  one. Attestation reads what the engine printed about itself, so a container restarted
+  or reconfigured between attestation and measurement invalidates the pairing.
+
+Two cells are not token-generation rates and are produced differently:
+
+- **Prompt Processing** is a *slope*, `d(tokens)/d(TTFT)` from
+  `prefill.py --length-sweep`, not a tokens-per-second read off one request. See the
+  next section for why the single-request ratio is not a prefill rate.
+- **TTFT** is the median over the four test prompts from `prefill.py --test …`, each
+  sample paired with its own immediately-preceding baseline reading.
 
 The acceptance windows landing on the **same** draft and accepted counts across every
 recording (`C1 26 169 7.500`, `NAT 256 512 3.000`) is the strongest signal that a
@@ -41,14 +44,106 @@ the target, and k together.
 
 Use `../scripts/bench/run-all.sh` to take the whole table again in one go.
 
+## Why the prefill rate is a slope
+
+The intuitive way to measure prefill throughput is one request: divide
+`prompt_tokens` by TTFT. On this deployment that produces a number that cannot be true.
+A 15-token prompt measured **182 ms** and a 347-token prompt measured **169 ms** —
+which would mean prefiling 332 more tokens took negative time. It does not: at these
+sizes TTFT is dominated by a per-request latency floor (queueing, scheduling, sampling
+setup, SSE plumbing), and the actual prefill work is a minority of it. Dividing by a
+number that barely contains prefill does not measure prefill.
+
+The fix is to make the floor cancel. `prefill.py --length-sweep` sends prompts at
+ten lengths from 16 to 8192 tokens and fits `tokens = slope x TTFT + c` by least
+squares; the slope is the marginal cost of tokens, and the intercept is the floor
+(about **91-96 ms** here, published as the fitted constant rather than inferred). The
+fit is restricted to samples with `TTFT >= 250 ms`, because the short end is
+floor-dominated and would drag the slope toward the intercept.
+
+Two contamination traps found while building it, both of which produced confident
+wrong numbers first:
+
+1. **Cross-run prefix-cache hits.** The first two sweeps returned **2917.7** and
+   **6664.2 tok/s** — a 2.3x disagreement, all of it in the probe. The prompt salt was
+   a per-process counter, so the second run rebuilt byte-identical prompts and got
+   cache hits on the longest ones, deleting the prefill it was supposed to be timing.
+   Salts are now unique across processes (pid + wall clock), and a cache hit is
+   *detected* via `cached_tokens`, reported, and excluded — a cache-hit sample is not a
+   slower measurement of the same thing, it is a measurement of a different thing.
+   After the fix the three reps gave 2840.1 / 2818.7 / 2808.3, a 1.1% spread, with
+   zero excluded hits.
+2. **Session drift read as a prompt property.** Measuring all samples of one test and
+   then the next made TTFT fall monotonically in *run order* (225 / 207 / 168 / 166 ms)
+   with ~2 ms spread within each test — the ordering was the variable, not the prompt.
+   Samples are now interleaved round-robin with the order alternating per round, and a
+   baseline prompt is measured immediately before every sample.
+
+That second fix surfaced a guard that vetoes valid measurements, which is its own kind
+of bug. The stability gate originally tested the *baseline's* spread, and flagged
+planning and prose UNSTABLE in every rep because their baseline alternated between
+~186 ms and ~141 ms — while the actual published readings moved only ~3 ms
+(207.4-211.0 and 207.0-210.3) and did not track the baseline's state at all. The
+baseline's mode turned out to depend on which prompt had run immediately *before* it,
+a property of the probe sequence rather than of anything under test. The gate now tests
+the spread of the quantity actually published, and the baseline is reported as
+diagnostic context (`baseline_spread_ms`, `baseline_ms_samples`) instead of wielding a
+veto. Same lesson as `--max-tokens` below: gate on what you publish.
+
+## Prefix caching is engaged but inert at these sizes
+
+The engine reports `enable_prefix_caching="True"`, so it is tempting to credit cached
+prefill for anything fast. It is not doing that here, and the evidence is
+`prompt_tokens_details.cached_tokens` on repeated identical requests:
+
+| prompt tokens | `cached_tokens` on a repeat |
+|---|---|
+| 296 (planning/prose) | 0 |
+| 347 (coding) | 0 |
+| 1292 | 0 |
+| 2572 | 0 |
+| 6412 | 4096 |
+
+Reuse begins only once a prompt fills at least **two full 2048-token KV blocks** —
+`max(0, (n // 2048 - 1) x 2048)` fits every row above. Worth knowing because the
+engine's own config line is misleading in two ways: `block_size` is *requested* as 64
+and *reported* as `2048` in `cache_config_info`, and the log carries "Prefix caching in
+Mamba cache 'align' mode is enabled ... experimental" alongside a
+"Prefix cache hit rate: 0.0%" at every interval.
+
+Do not lean on the engine's aggregate **"Prefix cache hit rate"** log line instead. It
+is cumulative over the container's life and it is *not* 0.0% on a box that has been
+probed: after a session of sweeps it read up to 12.3% (1071 of 1700 log intervals
+nonzero), entirely from long-prompt probe traffic — including the contaminated sweep
+runs described above, which were excluded from the fit but still registered hits. The
+per-request `cached_tokens` field is the only figure that attributes reuse to a specific
+measurement; the aggregate line says only that something somewhere hit.
+
+Two consequences for anyone measuring here. Any causal claim that rests on "prefix
+caching makes prefill cheap" is unsupported at prompt sizes below ~4k tokens — which
+includes every prompt in this table. And any probe that reuses prompt text across runs
+must check `cached_tokens`, because the contamination only bites at the long end, which
+is exactly where a slope is anchored.
+
 ## `--max-tokens` is part of the metric, not a knob
 
 `conc.py`'s `aggregate_tok_s` divides counted `completion_tokens` by wall time, but
-wall time also pays for prefill. The prompt here is a fixed ~243 tokens, so that
-uncounted prefill cost is amortised over `max_tokens`: at `conc=10`, 96
+wall time also pays for prefill. The test prompts are a fixed few hundred tokens
+(server-reported `prompt_tokens`: 286 counting, 296 planning, 296 prose, 347 coding),
+so that uncounted prefill cost is amortised over `max_tokens`: at `conc=10`, 96
 tokens/request reads ~13% below 256 on the *same boot*, while `conc=1` moves only
-~4% because prefix caching makes prefill nearly free for a single stream. That
-asymmetry is what made it look like a host problem.
+~4%. That asymmetry is what made it look like a host problem.
+
+Two things that used to be written in this section are **wrong and must not be
+re-derived**. First, the prompt was quoted as "~243 tokens", which is the `wc -w`
+*word* count of the planning prompt file, not a token count; the server's own figure
+is 296. Second, the single-stream immunity was attributed to "prefix caching making
+prefill nearly free", and prefix caching does not engage at all at these sizes (see
+[Prefix caching is engaged but inert at these sizes](#prefix-caching-is-engaged-but-inert-at-these-sizes)),
+so it cannot be making anything free in either cell. The size of the effect
+is measured and is the whole justification for the guard; *why* single stream is
+nearly immune while the capped cells move is not established. Quote the ~15%, not a
+mechanism.
 
 A verification pass measured the batched cells at **197** against the establishing
 A/B's **227.13** and called the gap an unidentified ~13% host-side depression. That
@@ -97,9 +192,9 @@ explain a delta between the two. The real cause was in the harness all along.
 ## Spread, and what is not comparable
 
 Run-to-run spread is real and metric-dependent. With every harness at its canonical
-parameter, repeated reps **on one boot** gave C1 **151.12-151.98** (peak 152.65), the
-natural 512-token probe **58.69-58.92**, and conc=10 at `--max-tokens 256`
-**229.16-231.64** — a ~1% range.
+parameter, repeated reps **on one boot** gave the C1 probe a ~0.6% range and the
+natural probe (canonical `--max-tokens 96`) a ~0.4% range — see
+[recorded-metrics.md](recorded-metrics.md) for the per-rep values.
 
 That is reps-on-one-boot, which is *not* a session-to-session noise floor and must
 not be quoted as one: it holds the boot, the box state and the cache state fixed, and
@@ -119,7 +214,8 @@ same era.
 
 ## Quote the era and the metric name with every number
 
-The realistic-suite metric for this configuration is **~40-42 tok/s**. Do not compare
+The realistic-suite metric for this configuration is **~42 tok/s**
+(`tok_s_1_100_after_ttft`, per-run medians 42.03-42.55). Do not compare
 that against the 15.67 that appears in the investigation's working notes:
 15.67 was measured in the **eager, k=4** era, before graphs were enabled at all, and
 it is not comparable to anything in the README table. Likewise the "~1.6x from spec

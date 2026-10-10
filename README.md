@@ -34,14 +34,20 @@ scripts/soak.sh                sustained-load soak (oneCCL IPC-handle wedge)
 scripts/lib/                   profile-env parser + the attestation rules (shared)
 scripts/falsify/run-all.sh     proves every guard and attestation rule CAN fail
 scripts/download-models.sh     pinned `hf` fetch + drafter patch + weight sha256 check
-scripts/bench/                 concurrency, C1/natural probes, realistic suite, surface
+scripts/bench/                 named-test concurrency sweep, C1/natural probes,
+                               prompt processing + TTFT, realistic suite, surface
 profiles/fp8/                  fp8.env + docker-compose.yml + model-patches/
 profiles/int4/                 PLACEHOLDER — READMEs only, no config
-data/                          realistic-suite-v1.json, prompt512.txt
-docs/                          configuration, measurement notes, the stride defect,
-                               the driver overlay, by-path, oneCCL/P2P, the drafter,
-                               verification discipline
+data/                          realistic-suite-v1.json + the four test prompts
+docs/                          configuration, the recorded metrics, measurement notes,
+                               the stride defect, the driver overlay, by-path,
+                               oneCCL/P2P, the drafter, verification discipline
 ```
+
+The four test prompts are `prompt-planning.txt`, `prompt-counting.txt`,
+`prompt-prose.txt`, and `prompt-coding.txt`. Each is bound to a generation budget in
+the `TESTS` table of `scripts/bench/conc.py`, so a test name selects prompt and budget
+together — see the metrics table below.
 
 ## Installation
 
@@ -98,37 +104,49 @@ with `FULL_DECODE_ONLY` graphs at ceiling 80. Full configuration:
 [docs/configuration.md](docs/configuration.md). All numbers below are from the same
 configuration, so they are comparable with each other.
 
-Every cell is a measurement taken on this host with the configuration above. Where a
-row carries several recordings they are separated by `·`; `/` separates probe windows
-that were measured together. Values quoted as a range are repeated reps, not a
-confidence interval, and the reps behind each row are not interchangeable protocols —
-[docs/measurement-notes.md](docs/measurement-notes.md) says which recording came from
-which harness and which are within-boot reps.
+Every cell is a measurement taken on this host with the configuration above, and each
+one is the **median of 3 reps** — a single number, deliberately, so two cells can be
+compared without deciding which of several recordings to believe. `aggregate_tok_s` is
+the metric for the token-generation rows.
 
-| metric | recorded | how |
-|---|---|---|
-| **conc=10 aggregate (the operating point)** | **227.13 · 229.59 · 230.47** | `conc.py --cells 10:30 --max-tokens 256` |
-| conc=12 aggregate | 221.50 · 228.81 · 230.41 | `conc.py --cells 12:30 --max-tokens 256` |
-| conc=9 aggregate | 212.42 · 206.01-209.50 | `conc.py --max-tokens 256` |
-| conc=8 aggregate | 202.56 · 202.64-205.11 | `conc.py --max-tokens 256` |
-| conc=1 aggregate | 42.6 · 43.95-43.97 | `conc.py --cells 1:6 --max-tokens 256` |
-| C1 counting probe (`"1 2"`, 16 tok) | **151.12-151.98** (peak 152.65) | `probe.py --prompt "1 2" --max-tokens 16 --iters 10` |
-| natural 512-token probe | **58.69-58.92** (peak 58.94) | `probe.py --max-tokens 96 --iters 6` |
-| realistic suite `tok_s_1_100_after_ttft` | **40.21-41.58** median (3 runs) | `suite.py` |
-| suite TTFT | 161-189 ms median | `suite.py` |
-| acceptance length (C1 / natural) | **7.500** (26/169) / **3.000** (256/512) — identical on every recording | `acceptance.sh` |
-| correctness | 15/15 · 30/30 per graphs-on A/B arm | `correctness.sh` |
-| serving surface | 5/5 | `surface.py` |
-| graph capture cost | 0.58-0.60 GiB/rank, 6 s | engine log |
-| configured capture ladder | `[1,2,4,8,16,24,32,40,48,56,64,72,80]` (13 sizes to 80) | engine log (`cudagraph_capture_sizes`) |
-| soak | 6/6 cycles, 3894 s, 0 wedges, 0 restarts | `soak.sh` |
+A **test name** pins the prompt *and* the `Max Tokens` budget together, from one table
+in `scripts/bench/conc.py`: the prompt and the budget are what the number measures, so
+they travel with the name and cannot be recombined. Each budget is the prompt's natural
+completion length, measured by running it to a stop rather than guessed; Coding is the
+one that never stops inside its budget, so its figure is a cap.
 
-`--max-tokens` is part of the metric, not a knob: `aggregate_tok_s` moves ~15%
-between 96 and 256 at `conc=10`, which is what once made a correct engine look ~13%
-depressed. What the spread actually is, which third-party numbers on this hardware are
-**not** parity targets, and which figures from the investigation were eager-era and are
-not comparable to anything above:
-[docs/measurement-notes.md](docs/measurement-notes.md).
+| test name | Concurrency | Max Tokens | recorded | how |
+|---|---:|---:|---:|---|
+| Technical Planning | 10 | 2048 | **239.70** | `conc.py --test planning --cells 10:30` |
+| Technical Planning | 5 | 2048 | 161.27 | `conc.py --test planning --cells 5:20` |
+| Technical Planning | 1 | 2048 | 45.81 | `conc.py --test planning --cells 1:6` |
+| Counting | 10 | 512 | **675.59** | `conc.py --test counting --cells 10:30` |
+| Counting | 5 | 512 | 473.83 | `conc.py --test counting --cells 5:20` |
+| Counting | 1 | 512 | 136.28 | `conc.py --test counting --cells 1:6` |
+| Prose | 10 | 2048 | **210.50** | `conc.py --test prose --cells 10:30` |
+| Prose | 5 | 2048 | 135.16 | `conc.py --test prose --cells 5:20` |
+| Prose | 1 | 2048 | 38.26 | `conc.py --test prose --cells 1:6` |
+| Coding | 10 | 2048 | **325.96** | `conc.py --test coding --cells 10:30` |
+| Coding | 5 | 2048 | 224.31 | `conc.py --test coding --cells 5:20` |
+| Coding | 1 | 2048 | 61.37 | `conc.py --test coding --cells 1:6` |
+| Prompt Processing | 1 | — | **2 819** tok/s | `prefill.py --length-sweep` |
+| TTFT | 1 | — | **210.7** ms | `prefill.py --test …` (median over the four test prompts) |
+
+Concurrency is the number of requests in flight, capped by `MAX_NUM_SEQS`; the top cell
+of each test is the state a busy engine is actually in. `—` on the last two rows means
+the budget is not part of that metric: both are read from the first token of a stream,
+which does not depend on how many tokens are asked for afterwards.
+
+`--max-tokens` is part of the metric, not a knob: `aggregate_tok_s` moves ~15% between
+96 and 256 at `conc=10`, which is what once made a correct engine look ~13% depressed.
+What the spread actually is, how each number above was produced, why Prompt Processing
+has to be measured as a slope and not a ratio, which third-party numbers on this
+hardware are **not** parity targets, and which figures from the investigation were
+eager-era and are not comparable to anything above:
+[docs/measurement-notes.md](docs/measurement-notes.md). The checks that do not fit this
+table — acceptance length, correctness, serving surface, graph capture, soak, and the
+single-stream and realistic-suite probes — are in
+[docs/recorded-metrics.md](docs/recorded-metrics.md).
 
 ## Qwen3.8-27B-INT4 Recorded Performance Metrics
 
@@ -139,18 +157,30 @@ not comparable to anything above:
 > number, mirroring the FP8 canonical set so the two profiles stay comparable —
 > measure at those values, or change the column and the cell together:
 >
-> | metric | value | how |
-> |---|---|---|
-> | conc=10 aggregate | *TBD* | `conc.py --cells 10:30 --max-tokens 256` |
-> | conc=9 aggregate | *TBD* | `conc.py --max-tokens 256` |
-> | conc=8 aggregate | *TBD* | `conc.py --max-tokens 256` |
-> | C1 counting probe | *TBD* | `probe.py --prompt "1 2" --max-tokens 16 --iters 10` |
-> | natural 512-token probe | *TBD* | `probe.py --max-tokens 96 --iters 6` |
-> | realistic suite `tok_s_1_100_after_ttft` | *TBD* | `suite.py` |
-> | acceptance length (C1 / natural) | *TBD* | `acceptance.sh` |
-> | correctness / serving surface | *TBD* | `correctness.sh` / `surface.py` |
-> | graph capture cost | *TBD* | engine log |
-> | soak | *TBD* | `soak.sh` |
+> | test name | Concurrency | Max Tokens | value | how |
+> |---|---:|---:|---:|---|
+> | Technical Planning | 10 | 2048 | *TBD* | `conc.py --test planning --cells 10:30` |
+> | Technical Planning | 5 | 2048 | *TBD* | `conc.py --test planning --cells 5:20` |
+> | Technical Planning | 1 | 2048 | *TBD* | `conc.py --test planning --cells 1:6` |
+> | Counting | 10 | 512 | *TBD* | `conc.py --test counting --cells 10:30` |
+> | Counting | 5 | 512 | *TBD* | `conc.py --test counting --cells 5:20` |
+> | Counting | 1 | 512 | *TBD* | `conc.py --test counting --cells 1:6` |
+> | Prose | 10 | 2048 | *TBD* | `conc.py --test prose --cells 10:30` |
+> | Prose | 5 | 2048 | *TBD* | `conc.py --test prose --cells 5:20` |
+> | Prose | 1 | 2048 | *TBD* | `conc.py --test prose --cells 1:6` |
+> | Coding | 10 | 2048 | *TBD* | `conc.py --test coding --cells 10:30` |
+> | Coding | 5 | 2048 | *TBD* | `conc.py --test coding --cells 5:20` |
+> | Coding | 1 | 2048 | *TBD* | `conc.py --test coding --cells 1:6` |
+> | Prompt Processing | 1 | — | *TBD* | `prefill.py --length-sweep` |
+> | TTFT | 1 | — | *TBD* | `prefill.py --test …` (median over the four test prompts) |
+>
+> The supporting checks that sit outside this grid — acceptance length, correctness,
+> serving surface, graph capture, soak, and the single-stream and realistic-suite
+> probes — take their column shape from
+> [docs/recorded-metrics.md](docs/recorded-metrics.md), which is where the FP8
+> equivalents are recorded. Fill them from `scripts/verify.sh` and
+> `scripts/bench/run-all.sh` on an idle engine, three reps per cell, median published,
+> and only from the harnesses in this repo.
 >
 > Until those cells are filled from a run this repo produced, do not substitute
 > numbers from elsewhere. Why the investigation's INT4 figures (C1 71.08, natural
@@ -164,7 +194,8 @@ not comparable to anything above:
 | doc | about |
 |---|---|
 | [docs/configuration.md](docs/configuration.md) | the whole measured config: pinned image + digests, model/KV quantization, patches, runtime flags, env vars, serve knobs, container and devices |
-| [docs/measurement-notes.md](docs/measurement-notes.md) | how to read the metrics table: where each recording comes from, the `max_tokens` mismatch, spread, eras, and the third-party numbers that are not parity targets |
+| [docs/recorded-metrics.md](docs/recorded-metrics.md) | every measurement the README does not show: acceptance, correctness, surface, graph capture, soak, the single-stream probes, the realistic suite |
+| [docs/measurement-notes.md](docs/measurement-notes.md) | how to read the metrics table: where each recording comes from, why the prefill rate is a slope, the `max_tokens` mismatch, spread, eras, and the third-party numbers that are not parity targets |
 | [docs/verification.md](docs/verification.md) | what each check proves, and the harness bugs that misreported healthy engines |
 | [docs/cudagraph-stride-defect.md](docs/cudagraph-stride-defect.md) | the graphs x DSpark defect, six falsified theories, the rejected patch, and the ceiling bug |
 | [docs/driver-overlay.md](docs/driver-overlay.md) | why the image is rebuilt from the pinned base |

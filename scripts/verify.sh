@@ -59,8 +59,26 @@ fi
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 LOG="$WORK/engine.log"; : > "$LOG"
+BOOTED_AT=""
 if [[ -n "$CTR" ]]; then
-  docker logs "$CTR" > "$LOG" 2>&1 || { echo "  FAIL cannot read logs of $CTR"; exit 1; }
+  # Timestamps, because boot_slice needs them to tell one boot from the next. Plain
+  # `docker logs` has no per-line time and cannot be sliced.
+  docker logs --timestamps "$CTR" > "$WORK/raw.log" 2>&1 \
+    || { echo "  FAIL cannot read logs of $CTR"; exit 1; }
+  BOOTED_AT=$(docker inspect -f '{{.State.StartedAt}}' "$CTR" 2>/dev/null)
+  RESTARTS=$(docker inspect -f '{{.RestartCount}}' "$CTR" 2>/dev/null)
+  if ! boot_slice "$WORK/raw.log" "$BOOTED_AT" "$LOG"; then
+    # Empty slice means the timestamps do not line up with StartedAt, not that the
+    # boot is clean. Fall back to the whole log so the check can only get stricter.
+    echo "  WARN boot slice empty (StartedAt=${BOOTED_AT:-missing}); scanning the full log"
+    cat "$WORK/raw.log" > "$LOG"
+  fi
+  # A restart is not something attestation should absorb silently: it means an earlier
+  # boot died, and which boot produced the numbers you are about to quote matters.
+  if [[ -n "$RESTARTS" && "$RESTARTS" != "0" ]]; then
+    echo "  NOTE container has restarted $RESTARTS time(s); attesting only this boot" \
+         "(started ${BOOTED_AT:-unknown})"
+  fi
 fi
 
 # --- 2. attestation ---------------------------------------------------------

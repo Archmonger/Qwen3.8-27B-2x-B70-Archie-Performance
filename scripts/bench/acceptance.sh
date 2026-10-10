@@ -20,7 +20,7 @@ set -uo pipefail
 
 PORT="${PORT:-8103}"; MNAME="${SERVED_NAME:-secondary}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROMPT_FILE="${PROMPT_FILE:-$HERE/../../data/prompt512.txt}"
+PROMPT_FILE="${PROMPT_FILE:-$HERE/../../data/prompt-planning.txt}"
 
 timeout 10 curl -sf -m 8 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 \
   || { echo "[acceptance] ABORT: /health not answering on $PORT"; exit 1; }

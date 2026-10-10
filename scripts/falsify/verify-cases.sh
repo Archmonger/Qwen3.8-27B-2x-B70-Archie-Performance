@@ -137,13 +137,133 @@ else
   echo "ok   rule/label coverage: $(echo "$rules_emitted" | wc -l | xargs) rules, all labelled"
 fi
 
+# --- boot_slice: the slice that decides WHICH boot the fatal rule gets to see.
+#     This is safety-relevant in both directions: a slice that keeps too little hides a
+#     real crash in the current boot, and a slice that keeps everything re-inherits
+#     crashes from long-dead boots (the bug that made attestation permanently red after
+#     one DEVICE_LOST). Each case therefore asserts membership, not just line counts.
+echo
+echo "=== boot_slice ==="
+{
+  echo '2026-10-09T02:59:50.000000000Z (APIServer pid=418) INFO starting boot one'
+  echo '2026-10-09T21:25:56.000000000Z (Worker_TP1) RuntimeError: UR_RESULT_ERROR_DEVICE_LOST'
+  echo '2026-10-09T21:26:06.000000000Z (APIServer pid=419) INFO starting boot two'
+  echo '2026-10-10T03:44:51.000000000Z (APIServer pid=419) INFO Engine 000: Running: 0 reqs'
+} > "$WORK/two-boots.log"
+
+check_slice() { # $1=desc $2=want-rc $3=since $4=must-contain $5=must-not-contain
+  local desc="$1" want_rc="$2" since="$3" must="$4" mustnot="$5" rc=0 kept
+  # boot_slice prints the kept-line count; capture it so the harness output stays one
+  # line per case. The count is asserted through membership below, not through this.
+  kept=$(boot_slice "$WORK/two-boots.log" "$since" "$WORK/sliced.log") && rc=0 || rc=$?
+  if [[ "$rc" != "$want_rc" ]]; then
+    echo "FAIL $desc: rc=$rc expected $want_rc"; fails=$((fails+1)); return
+  fi
+  if [[ -n "$must" ]] && ! grep -qF -- "$must" "$WORK/sliced.log"; then
+    echo "FAIL $desc: expected line '$must' is missing from the slice"; fails=$((fails+1)); return
+  fi
+  if [[ -n "$mustnot" ]] && grep -qF -- "$mustnot" "$WORK/sliced.log"; then
+    echo "FAIL $desc: dead-boot line '$mustnot' LEAKED into the slice"; fails=$((fails+1)); return
+  fi
+  echo "ok   $desc"
+}
+
+# Boot two is the live one: it must contain its own lines and must not carry the dead
+# boot's DEVICE_LOST, which is the whole point of slicing.
+check_slice "slices to the current boot" 0 '2026-10-09T21:26:06.222976221Z' \
+  'starting boot two' 'UR_RESULT_ERROR_DEVICE_LOST'
+# Same-second start: StartedAt carries nanoseconds, so a second-granularity comparison
+# must still keep the first line of the boot or the banner/capture lines get dropped.
+check_slice "keeps lines from the starting second" 0 '2026-10-09T21:26:06.000000000Z' \
+  'starting boot two' 'boot one'
+# FAIL-CLOSED: no usable boot start must fall back to the whole log, never to a narrower
+# window. A slice that quietly narrowed on parse failure would turn a missing timestamp
+# into a pass on the fatal rule.
+check_slice "missing boot start falls back to the full log" 0 '' \
+  'UR_RESULT_ERROR_DEVICE_LOST' ''
+check_slice "garbage boot start falls back to the full log" 0 'n/a' \
+  'UR_RESULT_ERROR_DEVICE_LOST' ''
+# An empty source is not "a clean log": it must fail rather than attest nothing.
+: > "$WORK/empty.log"
+if kept=$(boot_slice "$WORK/empty.log" '2026-10-09T21:26:06.222976221Z' "$WORK/s0.log"); then
+  echo "FAIL empty source log was accepted as a clean boot"; fails=$((fails+1))
+else
+  echo "ok   empty source log is rejected, not attested"
+fi
+# A boot start after every log line yields an empty slice, which must be an error.
+if kept=$(boot_slice "$WORK/two-boots.log" '2027-01-01T00:00:00.000000000Z' "$WORK/s1.log"); then
+  echo "FAIL a boot start after all logs was accepted as clean"; fails=$((fails+1))
+else
+  echo "ok   future boot start is rejected, not silently clean"
+fi
+
+# --- the fatal rule must actually consume the slice, and this must be proved in BOTH
+#     directions. Without this, boot_slice could be correct and unused -- how a fix
+#     becomes decoration -- or could silently widen back to the whole log and still
+#     print a green fatal verdict.
+#
+#     Both cases use the CLEAN config fixture plus a crash line, so every other rule has
+#     something to match. An earlier version ran fatal against a slice of two-boots.log,
+#     which has no config lines at all: fatal there was 'ok' for the wrong reason
+#     (nothing to extract), which is a pass that proves nothing.
+write_good "$WORK/clean.cfg"
+{ cat "$WORK/clean.cfg"
+  echo '2026-10-09T21:25:56.000000000Z (Worker_TP1) RuntimeError: UR_RESULT_ERROR_DEVICE_LOST'
+  echo '2026-10-09T21:26:06.000000000Z (APIServer pid=419) INFO starting boot two'
+  echo '2026-10-09T21:31:00.000000000Z (Worker_TP1) RuntimeError: UR_RESULT_ERROR_DEVICE_LOST'
+} > "$WORK/two-crashes.log"
+
+# (a) crash inside the boot -> fatal MUST be bad. Proves the slice is read at all.
+if boot_slice "$WORK/two-crashes.log" '2026-10-09T21:26:06.222976221Z' "$WORK/bad-boot.log" \
+   >/dev/null; then
+  fv=$(verdict_of "$WORK/bad-boot.log" fatal)
+  if [[ "$fv" == bad ]]; then
+    echo "ok   fatal fires on a crash inside the boot window"
+  else
+    echo "FAIL fatal verdict is '$fv' with a crash INSIDE the boot -- rule is not reading the slice"
+    fails=$((fails+1))
+  fi
+else
+  echo "FAIL could not slice the two-crash fixture"; fails=$((fails+1))
+fi
+
+# (b) crash only in the dead boot -> fatal MUST be ok. Proves the boundary is honoured,
+#     i.e. the slice is not quietly the whole log.
+if boot_slice "$WORK/two-crashes.log" '2026-10-09T21:26:06.222976221Z' "$WORK/good-boot.log" \
+   >/dev/null; then
+  # Re-slice from a log whose ONLY crash predates the boot start.
+  { cat "$WORK/clean.cfg"
+    echo '2026-10-09T21:25:56.000000000Z (Worker_TP1) RuntimeError: UR_RESULT_ERROR_DEVICE_LOST'
+    echo '2026-10-09T21:26:06.000000000Z (APIServer pid=419) INFO starting boot two'
+  } > "$WORK/one-crash.log"
+  boot_slice "$WORK/one-crash.log" '2026-10-09T21:26:06.222976221Z' "$WORK/good-boot.log" \
+    >/dev/null
+  fv=$(verdict_of "$WORK/good-boot.log" fatal)
+  if [[ "$fv" == ok ]]; then
+    echo "ok   fatal clears a crash that lives only in the dead boot"
+  else
+    echo "FAIL fatal verdict is '$fv' with no crash in this boot -- the slice is wider than the boot"
+    fails=$((fails+1))
+  fi
+else
+  echo "FAIL could not slice the one-crash fixture"; fails=$((fails+1))
+fi
+
 # --- optional cross-check: the fixture must extract the SAME values a real engine
 #     log does. Catches vLLM repr drift that would otherwise turn every rule into a
 #     no-op ("key not found" and "key wrong" both read as bad, so a broken regex on a
 #     real log looks exactly like a correctly failing check).
 if [[ -n "${CONTAINER:-}" ]] && command -v docker >/dev/null 2>&1 \
    && docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
-  docker logs "$CONTAINER" > "$WORK/live.log" 2>&1
+  # Timestamps + boot_slice, matching verify.sh exactly. Cross-checking the whole log
+  # while the live check reads one boot would let the two disagree about which lines are
+  # even in scope, which is the drift this file exists to prevent.
+  docker logs --timestamps "$CONTAINER" > "$WORK/live.raw" 2>&1
+  live_started=$(docker inspect -f '{{.State.StartedAt}}' "$CONTAINER" 2>/dev/null)
+  if ! boot_slice "$WORK/live.raw" "$live_started" "$WORK/live.log"; then
+    echo "  WARN live boot slice empty; cross-checking the full log"
+    cat "$WORK/live.raw" > "$WORK/live.log"
+  fi
   # Test the file, not a second `docker logs | grep -q .`: grep -q exits after one
   # line, docker logs takes SIGPIPE, and under `set -o pipefail` the pipeline reports
   # failure -- so a container with plenty of logs read as "no logs" and the check

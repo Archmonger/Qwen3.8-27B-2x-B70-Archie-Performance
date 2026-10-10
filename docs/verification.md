@@ -63,21 +63,38 @@ All three are fixed with **guards**, not just patches, so the class of bug stays
    measured arms never tested. Now: a bash array, plus a hard gate that the run
    executed exactly `${#prompts[@]} * REPS` probes. A run of 12/18 is a harness
    bug and exits non-zero rather than printing a rate.
-2. **A soak recorded a healthy engine as TIMEOUT.** `rc=143` was tallied as a stall
-   after the script's own kill. Now: only `rc=124` counts as a stall, `rc=143` is
-   INCONCLUSIVE, a cycle that returns `rc=0` early did not sustain anything and is
-   also INCONCLUSIVE, and a run with any inconclusive cycle exits 2 rather than
-   reporting PASS. A PASS can only come from cycles that actually ran to duration.
-   (`timeout --preserve-status` is deliberately *not* used — it would report 143 on
-   a genuine timeout and destroy the 124-vs-143 distinction.)
+2. **A soak recorded a healthy engine as TIMEOUT — and, once fixed, nearly recorded a
+   wedge as PASS.** `rc=143` was tallied as a stall after the script's own kill. Now:
+   `rc=143` is INCONCLUSIVE, and a run with any inconclusive cycle exits 2 rather than
+   reporting PASS. (`timeout --preserve-status` is deliberately *not* used — it would
+   report 143 on a genuine timeout and destroy the 124-vs-143 distinction.)
+   Two further defects in the same script were found while re-recording the soak row:
+   it referenced an unset `$MNAME` under `set -u` and aborted cycle 1 (a clean exit, so
+   a run that applied *no load at all* read as an engine problem); and it applied one
+   burst per cycle, which used to fill the window but drains in ~75 s now that CUDA
+   graphs doubled decode — so most cycles came back INCONCLUSIVE, i.e. the soak spent
+   87% of its time idle while claiming to soak.
+   The fix repeats the load until the deadline, which exposed a *third* bug worth
+   naming: reaching the deadline is not evidence of a healthy engine. An engine wedged
+   inside oneCCL also reaches 600 s, keeps answering `/health`, and completes nothing —
+   so the naive pass condition was satisfiable by the very failure the soak exists to
+   catch. A cycle now requires **both** the elapsed window **and** at least one load
+   round that completed under its own power; zero completed rounds is a FAIL, not a
+   pass. `--load-cells`, `--cycles` and `--cycle-seconds` are overridable so the guard
+   can actually be exercised rather than assumed.
 3. **A `--max-tokens` default silently changed the metric, and the engine was blamed.**
    `conc.py` computed `aggregate_tok_s` as counted `completion_tokens / wall`, but
    wall time also pays for prefill. Its default was 96 while every recorded number —
    and both scripted callers — used 256, so a hand-run sweep compared 96 against a
-   256 record and came out ~13% low. Because the fixed ~243-token prompt makes the
-   uncounted prefill cost amortise over `max_tokens`, the loss appeared at `conc=10`
-   and barely at `conc=1` (prefix caching makes prefill nearly free for one stream),
-   which is exactly the signature of a "host-side condition". Verified on one boot
+   256 record and came out ~13% low. Because the fixed prompt is a few hundred tokens
+   (server-reported `prompt_tokens`: 286 counting, 296 planning and prose, 347 coding),
+   the uncounted prefill cost amortises over `max_tokens`, so the loss appeared at
+   `conc=10` and barely at `conc=1` — which is exactly the signature of a "host-side
+   condition". (This section used to cite a "~243-token" prompt and attribute the
+   single-stream immunity to prefix caching. Both were wrong: 243 is the `wc -w` *word*
+   count of the planning file, and prefix caching is not engaged at these sizes at all,
+   so it cannot be making prefill free. The measured ~13%/~4% asymmetry stands; the
+   mechanism does not. See [measurement-notes.md](measurement-notes.md).) Verified on one boot
    with alternating arm order, changing only the flag: conc=10 **193.23-202.94** at
    96 vs **229.16-231.64** at 256, against a recorded 227.13. An out-of-sample point
    at 160 interpolated to ~211 and measured 214.82.
