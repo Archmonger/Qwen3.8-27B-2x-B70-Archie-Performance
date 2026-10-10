@@ -115,7 +115,7 @@ they travel with the name and cannot be recombined. Each budget is the prompt's 
 completion length, measured by running it to a stop rather than guessed; Coding is the
 one that never stops inside its budget, so its figure is a cap.
 
-| test name | Concurrency | Max Tokens | recorded | how |
+| Test Name | Concurrency | Tokens Generated | Value | Command |
 |---|---:|---:|---:|---|
 | Technical Planning | 10 | 2048 | **239.70** | `conc.py --test planning --cells 10:30` |
 | Technical Planning | 5 | 2048 | 161.27 | `conc.py --test planning --cells 5:20` |
@@ -157,7 +157,7 @@ single-stream and realistic-suite probes — are in
 > number, mirroring the FP8 canonical set so the two profiles stay comparable —
 > measure at those values, or change the column and the cell together:
 >
-> | test name | Concurrency | Max Tokens | value | how |
+> | Test Name | Concurrency | Tokens Generated | Value | Command |
 > |---|---:|---:|---:|---|
 > | Technical Planning | 10 | 2048 | *TBD* | `conc.py --test planning --cells 10:30` |
 > | Technical Planning | 5 | 2048 | *TBD* | `conc.py --test planning --cells 5:20` |
