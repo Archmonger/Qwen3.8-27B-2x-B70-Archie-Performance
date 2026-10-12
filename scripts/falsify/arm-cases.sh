@@ -3,8 +3,9 @@
 #
 # arm.sh is the thing that decides whether a measured difference is real, so a
 # silent failure in it does not announce itself -- it produces a confident table.
-# Seven defects were found in it by actually running it, and every one is asserted
-# here, because each would have passed while broken:
+# Eight defects were found in it by actually running it, or by reviewing what it
+# recorded, and every one is asserted here, because each would have passed while
+# broken:
 #
 #   1. the profile env is sourced AFTER argument parsing, so profiles/fp8/fp8.env
 #      (PORT=8103, IMAGE=, CEILING=, GPU_MEM_UTIL=, ...) overwrote the caller's
@@ -31,10 +32,16 @@
 #      that omits exactly those keys -- a nonexistent profile is rejected earlier
 #      for an unrelated reason, which is how a first draft of this case passed
 #      while testing nothing.
-#   7. an arm recorded gate=PASS with two conc cells at 0 tokens and unparseable
+#   7. a misspelled knob (DTIPE=float16) fell through to the pass-through env list,
+#      so the container booted at the profile default while the row was labelled
+#      and env-stamped as the fp16 arm. Asserted by refusing it, and by accepting
+#      every legitimate form so the refusals are not blanket.
+#   8. an arm recorded gate=PASS with two conc cells at 0 tokens and unparseable
 #      probes, because the only structural test asked whether the string "conc10"
 #      appeared. Asserted against the real artifacts, with a mutation per rule
-#      showing each one is load-bearing.
+#      showing each one is load-bearing. A probe that survived 1 of 10 iterations
+#      also passed on a healthy-looking median, so the iteration count is asserted
+#      too -- again with a mutation.
 #
 # Nothing here touches docker run, a GPU, or a serving endpoint: ARM_CHECK_ONLY
 # short-circuits before any container is created, and the rest is pattern and
@@ -256,10 +263,38 @@ if [[ "${SKIP_DEV:-0}" != 1 ]]; then
   rig bash "$ARM" CHECK 8199 >/dev/null 2>&1
   [[ $? -eq 0 ]] && ok "the shipped profile supplies them -- the rejection is not blanket" \
                  || bad "the real profile now fails the model-path guard"
+
+  # 7. a misspelled knob must be refused, not silently forwarded. DTIPE=float16
+  #    used to fall through to the pass-through env list, so the container booted
+  #    at the profile default while the row was labelled and stamped as an fp16
+  #    arm -- an inert knob recorded as a measurement. The rule is structural (only
+  #    arm knobs, profile names, or VLLM_*/DISABLE_ESIMD_* are legal), so it cannot
+  #    be half-blind the way an edit-distance check would be.
+  typo(){ rig bash "$ARM" CHECK 8199 "$@" >/dev/null 2>&1; echo $?; }
+  [[ "$(typo DTIPE=float16)" == 2 ]] \
+    && ok "a misspelled DTYPE is refused rather than passed through inert" \
+    || bad "DTIPE=float16 was accepted -- an inert knob can still be recorded as an arm"
+  [[ "$(typo MAMBA=float16)" == 2 ]] \
+    && ok "a misspelled MAMBA_SSM is refused" \
+    || bad "MAMBA=float16 was accepted"
+  [[ "$(typo CEILLING=80)" == 2 ]] \
+    && ok "a misspelled profile variable is refused" \
+    || bad "CEILLING=80 was accepted"
+  # The legitimate forms must survive, or the three rejections above are just
+  # "everything is refused". These are the exact shapes the W57 arms used.
+  for good in "PROBES=instrument DTYPE=float16" \
+              "VLLM_XPU_DISABLE_ESIMD_NORM=1" \
+              "DISABLE_ESIMD_GDN_SPEC=1" \
+              "NEEDLE=comp=norm_esimd" \
+              "CEILING=56"; do
+    [[ "$(typo $good)" == 0 ]] \
+      || bad "legitimate argument rejected: $good"
+  done
+  ok "real knob, profile, ablation-env and needle forms all still accepted"
 fi
 
 echo
-# --- 7. a measurement that did not happen must not record as a passing arm -----
+# --- 8. a measurement that did not happen must not record as a passing arm -----
 # One fp16 boot came back gate=PASS with conc5/conc1 at 0 tokens, conc10 at
 # 15.13 tok/s while its two sibling boots measured 237-240, and both single-stream
 # probes unparseable. The only structural test then asked whether the string
@@ -277,8 +312,11 @@ if need_python; then
   # testing the wrong rule -- "file absent" instead of "output unparseable".
   CELLS_OK='"conc10":{"aggregate_tok_s":240.17,"wall_s":40.1,"tokens":9728,"median_req_s":24.0},"conc5":{"aggregate_tok_s":169.16,"wall_s":30.2,"tokens":5120,"median_req_s":21.0},"conc1":{"aggregate_tok_s":46.99,"wall_s":20.5,"tokens":960,"median_req_s":21.3}'
   dg good_conc.json  "{\"test\":\"planning\",\"cells\":{$CELLS_OK}}"
-  dg good_c1.json    '{"label":"C1","median_tok_s_after_ttft":160.47,"n":10}'
-  dg good_nat.json   '{"label":"NAT","median_tok_s_after_ttft":56.65,"n":6}'
+  dg good_c1.json    '{"label":"C1","median_tok_s_after_ttft":160.47,"samples":10}'
+  dg good_nat.json   '{"label":"NAT","median_tok_s_after_ttft":56.65,"samples":6}'
+  # probe.py catches every per-iteration exception and continues, so 1 success out
+  # of 10 still prints a clean median. That is a partial measurement, not a result.
+  dg few_c1.json     '{"label":"C1","median_tok_s_after_ttft":160.47,"samples":1}'
   dg null_c1.json    'null'
   dg empty_nat.json  ''
   dg nullmed_c1.json '{"label":"C1","median_tok_s_after_ttft":null,"n":10}'
@@ -288,9 +326,10 @@ if need_python; then
   # Each rejection case also pins the REASON, not just the exit code. Without the
   # reason match, every probe case would pass on a missing file and the whole block
   # would be green against a check that tested nothing.
-  dcheck(){ # $1=label $2=want-rc $3=reason-regex $4=conc $5=c1 $6=nat
+  dcheck(){ # $1=label $2=want-rc $3=reason-regex $4=conc $5=c1 $6=nat [$7=c1-need $8=nat-need]
     local out rc want=$2 re=$3
-    out=$(assert_not_degenerate "$D/$4" "$D/$5" "$D/$6" 2>&1); rc=$?
+    out=$(A_C1_NEED=${7:-} A_NAT_NEED=${8:-} \
+            assert_not_degenerate "$D/$4" "$D/$5" "$D/$6" 2>&1); rc=$?
     if [[ $rc -ne $want ]]; then
       bad "$1 -> rc=$rc, wanted $want ($out)"
     elif [[ -n $re ]] && ! grep -qE "$re" <<<"$out"; then
@@ -305,17 +344,32 @@ if need_python; then
   dcheck "empty NAT probe rejected"              1 'NAT probe did not parse' good_conc.json good_c1.json empty_nat.json
   dcheck "null-median probe rejected"            1 'no positive median' good_conc.json nullmed_c1.json good_nat.json
   dcheck "missing conc file rejected"            1 'conc json unreadable' nope.json good_c1.json good_nat.json
+  # A median over one surviving sample is not a measurement: probe.py swallows
+  # per-iteration exceptions, so 1-of-10 prints a clean number. This is the case
+  # that the median-only check let through.
+  dcheck "1-of-10 C1 samples rejected"           1 'C1 probe completed 1/10' good_conc.json few_c1.json good_nat.json 10 6
+  # ...and the same artifact must be ACCEPTED when no expectation is supplied, so
+  # the case above proves it was the rule firing and not an unrelated rejection.
+  dcheck "same file ok with no expectation"      0 ''            good_conc.json  few_c1.json  good_nat.json
 
   # Mutations, one per rule, each blanking the LOOP ITSELF rather than a single
   # branch. Blinding just `if not cell.get('tokens')` is not a valid mutation: the
   # `elif` still fires on a zero-token / zero-tok/s cell, so the check would stay
   # strict and the mutation would fail for a reason that has nothing to do with the
   # rule under test. An empty iterable is the only edit that isolates one rule.
-  mcheck(){ # $1=label $2=sed-expr $3=conc $4=c1 $5=nat
+  mcheck(){ # $1=label $2=sed-expr $3=conc $4=c1 $5=nat [$6=c1-need $7=nat-need]
     sed "$2" "$HERE/../lib/degenerate.sh" > "$D/mut.sh"
+    # Guard against the mutation never applying: a sed pattern that matches nothing
+    # produces an unchanged copy, which then rejects exactly like the real code and
+    # reads as "the rule is not load-bearing". Assert the file actually changed.
+    if cmp -s "$D/mut.sh" "$HERE/../lib/degenerate.sh"; then
+      bad "MUTATION $1: sed matched nothing -- the mutant is the original, so this verdict is meaningless"
+      return
+    fi
     # the mutant must now ACCEPT an artifact the real check rejects, which is what
     # proves the assertion above depends on this specific rule
-    if ( . "$D/mut.sh"; assert_not_degenerate "$D/$3" "$D/$4" "$D/$5" >/dev/null 2>&1 ); then
+    if ( A_C1_NEED=${6:-} A_NAT_NEED=${7:-} \
+         . "$D/mut.sh"; assert_not_degenerate "$D/$3" "$D/$4" "$D/$5" >/dev/null 2>&1 ); then
       ok "MUTATION $1: check goes blind without this rule -- the case above is load-bearing"
     else
       bad "MUTATION $1: still rejected -- the case above does not depend on the rule it claims to test"
@@ -323,8 +377,10 @@ if need_python; then
   }
   mcheck "cell loop emptied" "s/for name in ('conc10', 'conc5', 'conc1'):/for name in ():/" \
          bad_conc.json good_c1.json good_nat.json
-  mcheck "probe loop emptied" "s/for tag, key in (('C1', 'A_C1RAW_F'), ('NAT', 'A_NATRAW_F')):/for tag, key in ():/" \
+  mcheck "probe loop emptied" "s/for tag, key, need in (('C1', 'A_C1RAW_F', 'A_C1_NEED'), ('NAT', 'A_NATRAW_F', 'A_NAT_NEED')):/for tag, key, need in ():/" \
          good_conc.json null_c1.json good_nat.json
+  mcheck "samples rule emptied" "s/if want and (d.get('samples') or 0) < want:/if False:/" \
+         good_conc.json few_c1.json good_nat.json 10 6
 fi
 
 echo

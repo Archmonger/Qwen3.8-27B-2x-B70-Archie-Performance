@@ -57,8 +57,9 @@ else:
         elif not (cell.get('aggregate_tok_s') or 0) > 0:
             bad.append('%s reported 0 tok/s while tokens were present' % name)
 
-for tag, key in (('C1', 'A_C1RAW_F'), ('NAT', 'A_NATRAW_F')):
+for tag, key, need in (('C1', 'A_C1RAW_F', 'A_C1_NEED'), ('NAT', 'A_NATRAW_F', 'A_NAT_NEED')):
     p = os.environ[key]
+    want = int(os.environ.get(need) or 0)
     try:
         raw = open(p).read().strip()
     except OSError:
@@ -67,8 +68,21 @@ for tag, key in (('C1', 'A_C1RAW_F'), ('NAT', 'A_NATRAW_F')):
     if raw in ('', 'null'):
         bad.append('%s probe did not parse' % tag)
         continue
-    if not ((load(p) or {}).get('median_tok_s_after_ttft') or 0) > 0:
+    d = load(p) or {}
+    if not (d.get('median_tok_s_after_ttft') or 0) > 0:
         bad.append('%s probe has no positive median' % tag)
+        continue
+    # A median over one surviving sample is not a measurement. probe.py catches
+    # every per-iteration exception and continues, so a boot where 9 of 10
+    # iterations errored still prints well-formed JSON with a healthy-looking
+    # median, and "samples" counts only the successes. Checking the median alone
+    # accepts that. Requiring the iteration count to have been met is what makes a
+    # partially-dead engine a rejected arm rather than a fast one.
+    # (No backticks in this comment: it sits inside a double-quoted python -c
+    # string, so bash would run them as command substitution and corrupt the code.)
+    if want and (d.get('samples') or 0) < want:
+        bad.append('%s probe completed %s/%s iterations'
+                   % (tag, d.get('samples'), want))
 
 if bad:
     print('DEGENERATE: ' + '; '.join(bad))

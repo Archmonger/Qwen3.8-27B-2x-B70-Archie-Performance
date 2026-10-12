@@ -68,6 +68,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/../lib/profile-env.sh"
 . "$HERE/../lib/attest.sh"
 . "$HERE/../lib/degenerate.sh"
+. "$HERE/../lib/engage.sh"
 
 LABEL=${1:?label: scripts/bench/arm.sh LABEL PORT [KEY=VALUE ...]}
 # Deliberately NOT named PORT. load_env_file below sources the profile, and
@@ -178,6 +179,33 @@ for kv in "$@"; do
     *)               PASS_ENV+=("$kv") ;;
   esac
 done
+# A mistyped knob is worse than an unknown one. `DTIPE=float16` matches no case
+# above, so it lands in PASS_ENV, is handed to the container as an env var no code
+# reads, and the arm boots at the profile default while the row is labelled and
+# env-stamped as if it had varied -- the inert-knob-measured-as-real failure this
+# script exists to prevent, arriving through a typo. An edit-distance test would
+# catch some typos and fail mysteriously on the rest, so the rule is structural:
+# anything reaching PASS_ENV must be either a documented profile variable (the
+# same names the override loop above accepts), one of the arm-only knobs, or the
+# engine's own VLLM_* / DISABLE_ESIMD_* environment. Nothing else is legitimate.
+# Kept beside the override list on purpose: add a knob in one place, add it here.
+ARM_KNOWN="IMAGE CEILING GPU_MEM_UTIL MAX_NUM_SEQS MAX_MODEL_LEN MODELS_DIR
+TARGET_DIR DRAFTER_DIR CACHE_DIR PORT NUM_SPEC_TOKENS KV_CACHE_DTYPE SPEC
+COMPILE XPU_GRAPH PREFIX_CACHE DTYPE MAMBA_SSM_CACHE_DTYPE EXTRA_VLLM_ARGS
+RUNSTATE_DIR PROFILE DTYPE_ARGS MAMBA_SSM KVDT NEEDLE NEEDLE_ABSENT PROBES
+ARM_CHECK_ONLY ARM_ROWS ARM_OUT_DIR ARM_BOOT_TIMEOUT W57_HOLD DEVICES_ENV"
+for _kv in ${PASS_ENV[@]+"${PASS_ENV[@]}"}; do
+  _k=${_kv%%=*}
+  case "$_k" in
+    VLLM_*|DISABLE_ESIMD_*) continue ;;
+  esac
+  _found=0
+  for _n in $ARM_KNOWN; do [[ "$_n" == "$_k" ]] && { _found=1; break; }; done
+  [[ $_found -eq 1 ]] && continue
+  echo "arm: unrecognized argument '$_kv'. Arm knobs are DTYPE= MAMBA_SSM= KVDT= NEEDLE= NEEDLE_ABSENT= PROBES=; profile variables are listed in ARM_KNOWN; extra engine env must be VLLM_* or DISABLE_ESIMD_*" >&2
+  exit 2
+done
+unset _kv _k _n _found
 # The dtype knobs reach the launcher as the env vars scripts/serve.sh already
 # understands, NOT as extra argv: a second route to --dtype could emit the flag
 # twice, and the env route is the one that ships, so exercising it is the point.
@@ -380,6 +408,28 @@ maxsize=$(grep -oE "cudagraph_capture_sizes.: \[[0-9, ]+\]" "$L" | tail -1 \
           | tr -d 'a-z_[] ' | tr ',' '\n' | grep -E '^[0-9]+$' | sort -n | tail -1)
 say "healthy +$((j*3))s ceil=${ceil:-?} ladder_max=${maxsize:-?} capture=${cap:-none} | ${kvtok:-kv?} | ${dtype:-dtype?}"
 
+# --- the dtype knobs must be provably applied --------------------------------
+# attest.sh checks ceiling, ladder, graphs, k, method, schedule, capture, V2 and
+# KV dtype -- but not dtype. An arm asked to boot at float16 that silently came up
+# at bfloat16 would otherwise record gate=PASS under an fp16 label with plausible
+# numbers. Both checks live in scripts/lib/engage.sh so the falsification harness
+# exercises the same code the live path runs.
+if ! msg=$(assert_dtype_applied "$L" "$DTYPE"); then
+  say "ABORT DTYPE: $msg -- the knob did not apply"
+  row "dtype-not-applied:${DTYPE}" "${PASS_ENV[*]:-}"; exit 1
+fi
+[[ -n "$DTYPE" && "$DTYPE" != auto ]] && say "$msg"
+
+msg=$(assert_ssm_applied "$L" "$MAMBA_SSM"); ssm_rc=$?
+if [[ $ssm_rc -eq 1 ]]; then
+  say "ABORT SSM: $msg"
+  row "ssm-not-applied:${MAMBA_SSM}" "${PASS_ENV[*]:-}"; exit 1
+fi
+# rc 2 means "not provable here" (the pin equals the checkpoint value, so the
+# engine emits no warning to detect). Print it either way so a reader of the log
+# cannot mistake an unproven claim for a verified one.
+[[ -n "$MAMBA_SSM" && "$MAMBA_SSM" != auto ]] && say "$msg"
+
 # --- engagement assertion ----------------------------------------------------
 CENSUS=$(grep -oE "\[w57-census\] (path|comp)=.*" "$L" | sort -u)
 # A census-shaped needle can only be satisfied by the instrumented modules, so
@@ -433,12 +483,13 @@ grep -q '"conc10"' <<<"$conc" || { say "INVALID: conc10 missing"; row conc-probe
 printf '%s\n' "$conc" > "$O/${LABEL}.conc.json"
 
 # --- single-stream probes (same harness as the recorded rows) ----------------
+C1_ITERS=10; C1_WARM=3; NAT_ITERS=6; NAT_WARM=2
 c1=$(timeout 300 python3 "$HERE/probe.py" --url "http://127.0.0.1:$ARM_PORT/v1/completions" \
-      --model "$MNAME" --prompt "1 2" --max-tokens 16 --iters 10 --warmup 3 \
+      --model "$MNAME" --prompt "1 2" --max-tokens 16 --iters "$C1_ITERS" --warmup "$C1_WARM" \
       --label C1 2>&1 | tr -d '\n')
 nat=$(timeout 300 python3 "$HERE/probe.py" --url "http://127.0.0.1:$ARM_PORT/v1/completions" \
       --model "$MNAME" --prompt "$(cat "$HERE/../../data/prompt-planning.txt")" \
-      --max-tokens 96 --iters 6 --warmup 2 --label NAT 2>&1 | tr -d '\n')
+      --max-tokens 96 --iters "$NAT_ITERS" --warmup "$NAT_WARM" --label NAT 2>&1 | tr -d '\n')
 printf '%s\n' "$c1"  > "$O/${LABEL}.c1raw.json"
 printf '%s\n' "$nat" > "$O/${LABEL}.natraw.json"
 
@@ -451,9 +502,13 @@ except Exception: print('null')" <<<"$1"; }
 # The rules live in scripts/lib/degenerate.sh so the falsification harness tests
 # the same code the live path runs. The reason one arm had to be rejected this way
 # (gate=PASS, two conc cells at 0 tokens, probes unparseable) is recorded there.
+# Exported, not prefixed: `A=x B=$(cmd)` is a list of two assignments, so a
+# prefixed var would never be exported into the command substitution's environment
+# and the check would silently see "no expectation" and skip itself.
+export A_C1_NEED=$C1_ITERS A_NAT_NEED=$NAT_ITERS
 degenerate_msg=$(assert_not_degenerate "$O/${LABEL}.conc.json" \
-                                        "$O/${LABEL}.c1raw.json" \
-                                        "$O/${LABEL}.natraw.json")
+                                      "$O/${LABEL}.c1raw.json" \
+                                      "$O/${LABEL}.natraw.json")
 drc=$?
 if [[ $drc -ne 0 ]]; then
   say "INVALID: $degenerate_msg -- not recording this arm as measured"
