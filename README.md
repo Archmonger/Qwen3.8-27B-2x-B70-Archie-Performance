@@ -36,6 +36,10 @@ scripts/falsify/run-all.sh     proves every guard and attestation rule CAN fail
 scripts/download-models.sh     pinned `hf` fetch + drafter patch + weight sha256 check
 scripts/bench/                 named-test concurrency sweep, C1/natural probes,
                                prompt processing + TTFT, realistic suite, surface
+scripts/bench/arm.sh           one A/B arm: boot with overrides, attest, engage-assert,
+                               then gate and measure through the harnesses above
+scripts/instrument/            dispatch-census modules arm.sh mounts, so a knob can be
+                               shown to engage instead of assumed to have
 profiles/fp8/                  fp8.env + docker-compose.yml + model-patches/
 profiles/int4/                 PLACEHOLDER — READMEs only, no config
 data/                          realistic-suite-v1.json + the four test prompts

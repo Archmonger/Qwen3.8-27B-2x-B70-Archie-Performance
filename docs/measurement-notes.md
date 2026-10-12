@@ -227,6 +227,71 @@ Always state which metric you are quoting. `tok_s_1_100_after_ttft` (`suite.py`)
 `aggregate_tok_s` (`conc.py`), `median_tok_s_after_ttft` (`probe.py`), and the
 engine log's "Avg generation throughput" are four different measurements.
 
+## Prove the knob engaged before reporting "no effect"
+
+An A/B where the knob did nothing and an A/B where the knob did nothing *useful*
+produce the same table. Both read "no effect", and only one of them is true. The
+earliest version of this project reported three `XPU_*` environment knobs inert on
+throughput alone; the graph knob's inertness was later demonstrated properly (the
+engine log showed `cudagraph_mode=NONE` and no capture, so the flag had genuinely
+not applied), but the other two rested on "the number did not move". A flat result
+is only evidence about a knob you showed was live.
+
+So `scripts/bench/arm.sh` requires a positive engagement assertion — `NEEDLE` /
+`NEEDLE_ABSENT` — and aborts the arm rather than recording a row when the engine
+log and the dispatch census both fail to match. Two rules make that assertion
+worth anything:
+
+**Read the engine's own words, not your intent.** Attestation already does this
+for configuration (`../scripts/lib/attest.sh`), and the same discipline applies
+to code paths: grep the log for what the kernel printed, and census the dispatch
+branches actually taken.
+
+**Place an instrument at the point of no return.** This is the trap that nearly
+produced a published falsehood. A census note added at the *top* of the ESIMD GDN
+entry points logged every time the function was entered — before the block that
+checks `conv_state.dtype` and `ssm_state.dtype`. It printed confidently from an
+arm where the guard then rejected the call and the kernel never ran. Moving the
+same note immediately before the `op()` invocation inverted the result: the
+combination of `--dtype float16` and `--mamba-ssm-cache-dtype float16` prints it,
+and `--dtype float16` alone does not. A probe that fires on entry proves the
+function was *called*; only a probe beside the launch proves it *ran*.
+
+The corollary is that the census needs its own mount proof. The instrumented
+modules are bind-mounted over the image's copies, and a failed mount still
+produces valid `tok/s` — it just produces no census lines, which is exactly the
+evidence used to declare a path dead. `arm.sh` therefore asserts the live files
+contain the probe marker before it believes their silence.
+
+**Engagement proves a path ran. Only ablation proves it mattered.** Those are
+different claims and the second does not follow from the first. A shipped comment
+asserted that `--dtype float16` is faster *because* two ESIMD kernels are gated on
+`float16` and never run under bfloat16. Both halves checked out — the census showed
+the kernels firing under fp16 and silent under bf16, and the engine was faster under
+fp16 — and the conclusion was still wrong. The image exposes
+`VLLM_XPU_DISABLE_ESIMD_NORM` and `DISABLE_ESIMD_GDN_SPEC`, so each kernel could be
+switched off with the dtype pins still set, and the census proved each ablation
+applied. The win did not move. Disabling both at once did not move it either. The
+kernels were correlates.
+
+Two things made that mistake easy, and both are guardable:
+
+*The explanation was available before it was tested.* The source contains a literal
+`x.dtype == torch.float16` in the kernel's gate, so the causal sentence read like a
+description of the code rather than a claim about performance. A gate in the source
+establishes that a path is *reachable only* under fp16; it says nothing about how
+much of the time that path is responsible for.
+
+*Ablate jointly, not only singly.* Each kernel off alone changed nothing, which is
+weak evidence on its own: two redundant paths can each be individually unnecessary.
+The arm that settles it disables both. If a single ablation shows no effect and the
+paths might be redundant, the combined arm is not optional.
+
+The rule: when a knob's effect is explained by some path that newly appears, look
+for the switch that removes *just that path* and measure again. If the image exposes
+no such switch, write that the mechanism is unresolved instead of publishing the
+correlation as the reason.
+
 ## The INT4 placeholder cells
 
 The INT4 table in the README is empty on purpose. Until those cells are filled from a

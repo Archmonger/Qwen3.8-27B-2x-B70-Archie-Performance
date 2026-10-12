@@ -16,6 +16,23 @@
 #     NAT-window  256 512 3.000
 # At k=7 the ceiling is 8.000. Zero drafts is a hard failure -- spec decode
 # silently disabling itself is exactly what this file exists to catch.
+#
+# Which of the three numbers to trust. The ACCEPTED count is the load-bearing one:
+# across ~12 boots spanning bfloat16 and float16 it has read 512 every single time,
+# with the C1 window pinned at 26 169 7.500. Draft counts are the soft ones -- the
+# NAT window has also been read as 258 and as 272, and 272 drags accept_len from
+# 3.000 to 2.882 (+16 drafts, +0 accepted). Treat that as a window-boundary
+# artifact rather than a result: no mechanism for the +16 is established, so do not
+# quote accept_len as evidence a config changed acceptance behaviour unless the
+# accepted count moves with it.
+#
+# Why the boundary is a single read and not a poll. A drain() that waited for
+# several consecutive equal readings was written and unit-tested as a stabiliser,
+# then failed to remove the 272 in two independent runs and changed nothing on a
+# healthy engine. Keeping it would have meant editing this file's read protocol AND
+# the harness that pins it (falsify/acceptance-cases.sh scripts one /metrics
+# response per read) on the strength of a causal story that did not hold up.
+# Reverted for that reason; the note above is what survives of it.
 set -uo pipefail
 
 PORT="${PORT:-8103}"; MNAME="${SERVED_NAME:-secondary}"
