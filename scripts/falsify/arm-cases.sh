@@ -121,8 +121,9 @@ if [[ "${SKIP_DEV:-0}" != 1 ]]; then
   # The mutant must sit in arm.sh's OWN directory: arm.sh resolves
   # lib/profile-env.sh relative to BASH_SOURCE, so a copy under $T cannot even
   # load its profile parser (which is exactly the class of harness bug that
-  # reports "still rejected" for a rule that is load-bearing). Same filesystem,
-  # mode preserved, removed with the trap.
+  # reports "still rejected" for a rule that is load-bearing). It is invoked as
+  # `bash "$MUT"`, so the 644 a redirection creates does not matter, and the
+  # harness EXIT trap removes it.
   MUT="$HERE/../bench/arm-mut.$$.sh"
   if ! sed 's/^DTYPE=${DTYPE:-}; MAMBA_SSM=${MAMBA_SSM_CACHE_DTYPE:-};/DTYPE=${DTYPE:-}; MAMBA_SSM="";/' \
        "$ARM" > "$MUT" 2>"$T/mutseed.sed.err"; then
@@ -131,7 +132,7 @@ if [[ "${SKIP_DEV:-0}" != 1 ]]; then
     bad "MUTATION profile ssm seed reverted: sed matched nothing -- mutant IS the original"
   else
     out=$(rig env MAMBA_SSM_CACHE_DTYPE=bfloat16 bash "$MUT" CHECK 8199 2>&1)
-    rm -f "$MUT"
+    rm -f "$MUT"   # before the asserts: a FAIL here must not leave a mutant in the tree
     grep -q "ssm=profile" <<<"$out" \
       && ok "MUTATION profile ssm seed reverted: pin vanishes from the assertion -- rule is load-bearing" \
       || bad "MUTATION profile ssm seed reverted: still asserted ($out) -- the case above does not depend on the seed"
