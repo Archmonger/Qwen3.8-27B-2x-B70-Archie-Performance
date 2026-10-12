@@ -418,6 +418,36 @@ if [[ $DO_START -eq 1 ]]; then
   say "--- starting $CTR ---"
   docker compose "${compose_files[@]}" -f "$COMPOSE_FILE" up -d --force-recreate \
     || die "compose up failed"
+
+  # Wait for readiness BEFORE verifying. `up -d` returns the instant the container
+  # is created, and this engine needs roughly 200 s to load 27B weights across two
+  # ranks, warm the sampler, and bind PORT. Without the wait, setup.sh's own verify
+  # step checked /health a second after creation and failed on every cold boot, so a
+  # first-time install could never succeed with verification on -- the only way
+  # through was --no-verify plus a second, manual verify.
+  #
+  # Poll /health rather than sleeping a fixed time: a warm boot returns
+  # immediately, so the timeout is a ceiling and not a delay. It only runs when
+  # verification is on; --no-verify means "I will check later" and must not block.
+  if [[ $DO_VERIFY -eq 1 ]]; then
+    say "--- waiting for $CTR to answer /health on $PORT ---"
+    boot_deadline=$(( $(date +%s) + ${SETUP_BOOT_TIMEOUT:-600} ))
+    ready=0
+    while (( $(date +%s) < boot_deadline )); do
+      if timeout 5 curl -sf -m 8 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+        ready=1; break
+      fi
+      # Fail early on a container that is already gone: sitting out the full timeout
+      # on a crash-loop only hides the reason longer.
+      state=$(docker inspect -f '{{.State.Status}}' "$CTR" 2>/dev/null || echo missing)
+      if [[ "$state" == exited || "$state" == dead || "$state" == missing ]]; then
+        die "container $CTR is $state -- docker logs $CTR | tail -40"
+      fi
+      sleep 5
+    done
+    [[ $ready -eq 1 ]] || die "no /health on $PORT within ${SETUP_BOOT_TIMEOUT:-600}s -- docker logs $CTR | tail -40"
+    say "ok      $CTR healthy"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
