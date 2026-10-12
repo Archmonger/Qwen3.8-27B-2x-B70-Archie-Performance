@@ -31,7 +31,8 @@ image/Dockerfile               pinned base + Intel GPU userspace driver overlay
 scripts/serve.sh               in-container launcher (assembles the vllm serve line)
 scripts/verify.sh              config attestation + correctness + acceptance + surface
 scripts/soak.sh                sustained-load soak (oneCCL IPC-handle wedge)
-scripts/lib/                   profile-env parser + the attestation rules (shared)
+scripts/lib/                   profile-env parser + the attestation, engagement and
+                               degeneracy rules (shared with the harness)
 scripts/falsify/run-all.sh     proves every guard and attestation rule CAN fail
 scripts/download-models.sh     pinned `hf` fetch + drafter patch + weight sha256 check
 scripts/bench/                 named-test concurrency sweep, C1/natural probes,

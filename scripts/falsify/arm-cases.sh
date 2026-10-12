@@ -61,7 +61,7 @@ need_python(){ command -v python3 >/dev/null 2>&1 || { echo "  SKIP python3 not 
 # through the two overrides arm.sh documents -- DEVICES_ENV and an absolute
 # RUNSTATE_DIR (both are in its caller-override list, which is what makes them
 # survive the profile sourcing being tested in case 1).
-T=$(mktemp -d); trap 'rm -rf "$T" "$REPO/profiles/w57-fixture"' EXIT
+T=$(mktemp -d); trap 'rm -rf "$T" "$REPO/profiles/w57-nofp"' EXIT
 [[ -f "$REPO/profiles/fp8/fp8.env" ]] || { echo "  FAIL: no profiles/fp8/fp8.env"; exit 1; }
 mkdir -p "$T/runstate/dri-by-path"
 
@@ -320,12 +320,57 @@ if need_python; then
   dg null_c1.json    'null'
   dg empty_nat.json  ''
   dg nullmed_c1.json '{"label":"C1","median_tok_s_after_ttft":null,"n":10}'
+  # A raw stdout capture is not necessarily ONLY the JSON. conc.py prints its
+  # WARMUP_FAILED line to stdout, and any interpreter-shutdown warning lands there
+  # too. The check must find the object rather than demand a pure file, or a stray
+  # diagnostic rejects a healthy boot -- the expensive direction of failure.
+  dg stray_conc.json "Exception ignored in: <urllib3.connectionpool>  ResourceWarning"
+  printf '%s\n' "{\"test\":\"planning\",\"cells\":{$CELLS_OK}}" >> "$D/stray_conc.json"
   # verbatim from FP16_PROBED2: two cells completed nothing
   dg bad_conc.json   '{"test":null,"cells":{"conc10":{"aggregate_tok_s":15.13,"wall_s":321.4,"tokens":4864,"median_req_s":10.72},"conc5":{"aggregate_tok_s":0.0,"wall_s":0.0,"tokens":0,"median_req_s":null},"conc1":{"aggregate_tok_s":0.0,"wall_s":0.0,"tokens":0,"median_req_s":null}}}'
 
   # Each rejection case also pins the REASON, not just the exit code. Without the
   # reason match, every probe case would pass on a missing file and the whole block
   # would be green against a check that tested nothing.
+  #
+  # First, the extractor itself. A previous revision replaced `tr -d '\n'` with
+  # `grep -o '{.*}'` and EVERY arm would have been rejected as unparseable, because
+  # probe.py prints INDENTED json and a single-line brace match returns the lone
+  # character "{". Nothing here caught it, because every fixture below is written as
+  # one-line JSON -- so the harness stayed green against a pipeline that could never
+  # parse real probe output. These cases use the multi-line form probe.py emits.
+  printf '{\n  "label": "C1",\n  "median_tok_s_after_ttft": 160.47,\n  "samples": 10\n}\n' \
+    > "$D/pretty_c1.json"
+  jo(){ # -> prints "obj" or "none"; rc 0 when the file holds a decodable object
+    python3 -c "
+import sys
+sys.path.insert(0, sys.argv[1])
+from jsonobj import jsonobj
+o = jsonobj(sys.argv[2])
+print('obj' if o is not None else 'none')
+sys.exit(0 if o is not None else 1)" "$HERE/../bench" "$1"
+  }
+  # probe.py's real indented output, a stray line ahead of a good payload, and the
+  # conc fixture above are all accepted; a file with no object is refused.
+  jo "$D/pretty_c1.json" >/dev/null \
+    && ok "jsonobj decodes probe.py's indented output" \
+    || bad "jsonobj rejected indented JSON -- every arm would be discarded as unparseable"
+  jo "$D/stray_conc.json" >/dev/null \
+    && ok "jsonobj skips a stray line before the payload" \
+    || bad "jsonobj rejected a payload preceded by a diagnostic line"
+  printf 'no json at all here\n' > "$D/nojson.txt"
+  jo "$D/nojson.txt" >/dev/null \
+    && bad "jsonobj matched an object in a file containing none" \
+    || ok "jsonobj returns None when there is no object"
+  # A broken parser import must say so, not exit 1 in silence. Silent failure looks
+  # exactly like a degenerate measurement, and in this very file it would look like a
+  # mutation that proved nothing.
+  mkdir -p "$D/emptydir"
+  out=$(DG_BENCH_DIR="$D/emptydir" assert_not_degenerate "$D/good_conc.json" \
+        "$D/good_c1.json" "$D/good_nat.json" 2>&1)
+  grep -q 'cannot import jsonobj' <<<"$out" \
+    && ok "a missing parser fails loudly instead of reading as degenerate" \
+    || bad "broken import was silent or mislabelled: $out"
   dcheck(){ # $1=label $2=want-rc $3=reason-regex $4=conc $5=c1 $6=nat [$7=c1-need $8=nat-need]
     local out rc want=$2 re=$3
     out=$(A_C1_NEED=${7:-} A_NAT_NEED=${8:-} \
@@ -344,6 +389,9 @@ if need_python; then
   dcheck "empty NAT probe rejected"              1 'NAT probe did not parse' good_conc.json good_c1.json empty_nat.json
   dcheck "null-median probe rejected"            1 'no positive median' good_conc.json nullmed_c1.json good_nat.json
   dcheck "missing conc file rejected"            1 'conc json unreadable' nope.json good_c1.json good_nat.json
+  # A diagnostic line before the payload must NOT reject the arm: the payload is
+  # still there and complete, so rejecting it discards a healthy boot.
+  dcheck "stray line before conc json accepted"  0 ''            stray_conc.json good_c1.json good_nat.json
   # A median over one surviving sample is not a measurement: probe.py swallows
   # per-iteration exceptions, so 1-of-10 prints a clean number. This is the case
   # that the median-only check let through.
@@ -368,8 +416,20 @@ if need_python; then
     fi
     # the mutant must now ACCEPT an artifact the real check rejects, which is what
     # proves the assertion above depends on this specific rule
-    if ( A_C1_NEED=${6:-} A_NAT_NEED=${7:-} \
-         . "$D/mut.sh"; assert_not_degenerate "$D/$3" "$D/$4" "$D/$5" >/dev/null 2>&1 ); then
+    # The mutant env MUST be exported with explicit `export`, on its own statement,
+    # not written as a prefix on the `.` line. Two separate traps:
+    #  * `X=v . file` does NOT export X. Bash treats an assignment preceding the
+    #    source builtin as a plain shell assignment and rolls it back when the
+    #    source returns, so assert_not_degenerate never saw DG_BENCH_DIR, died on an
+    #    ImportError, and every mutation read as "still rejected" -- which this
+    #    harness would then report as "this rule is not load-bearing", a verdict
+    #    caused entirely by a harness path bug rather than the mutation.
+    #  * `A=x B=y cmd` is a LIST: only the final word is the command, earlier
+    #    assignments set the caller's vars without exporting them either.
+    # The mutant also lives in $T with no sibling bench/, so DG_BENCH_DIR is required.
+    if ( export A_C1_NEED=${6:-} A_NAT_NEED=${7:-} DG_BENCH_DIR="$HERE/../bench"
+         . "$D/mut.sh"
+         assert_not_degenerate "$D/$3" "$D/$4" "$D/$5" >/dev/null 2>&1 ); then
       ok "MUTATION $1: check goes blind without this rule -- the case above is load-bearing"
     else
       bad "MUTATION $1: still rejected -- the case above does not depend on the rule it claims to test"

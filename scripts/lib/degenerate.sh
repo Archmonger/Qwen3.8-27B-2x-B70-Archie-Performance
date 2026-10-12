@@ -32,14 +32,45 @@
 
 assert_not_degenerate(){
   local conc_f=${1:?conc json file} c1_f=${2:?C1 raw file} nat_f=${3:?NAT raw file}
-  A_CONC_F="$conc_f" A_C1RAW_F="$c1_f" A_NATRAW_F="$nat_f" python3 -c "
+  # Where does jsonobj.py live? Derive it from THIS file's own path, not the
+  # caller's cwd, so the gate works when sourced from arm.sh, from a falsify
+  # harness, or from an interactive shell. DG_BENCH_DIR overrides it: a MUTANT
+  # copy of this file sits in a temp directory with no sibling bench/ folder, so
+  # file-relative resolution cannot work there and the harness names the directory
+  # explicitly instead. (Left to itself the mutant fails the import, python exits
+  # nonzero, and every mutation reads as "still rejected" -- which the harness would
+  # report as "this rule is not load-bearing", a verdict caused entirely by a broken
+  # import path rather than by the mutation. Wrong-for-the-reason green and
+  # wrong-for-the-reason red are equally bad.)
+  local dg_dir
+  dg_dir=${DG_BENCH_DIR:-}
+  if [[ -n "$dg_dir" ]]; then
+    dg_dir=$(cd -- "$dg_dir" 2>/dev/null && pwd) || dg_dir=
+  else
+    dg_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../bench" 2>/dev/null && pwd) || dg_dir=
+  fi
+  if [[ -z "$dg_dir" ]]; then
+    echo "DEGENERATE: cannot locate scripts/bench (DG_BENCH_DIR='$DG_BENCH_DIR')"
+    return 1
+  fi
+  A_CONC_F="$conc_f" A_C1RAW_F="$c1_f" A_NATRAW_F="$nat_f" \
+  PYTHONPATH="$dg_dir${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
 import json, os, sys
+try:
+    from jsonobj import jsonobj
+except ImportError as exc:
+    # Fail LOUD. A silent import failure would exit nonzero with an empty stdout,
+    # which upstream reads as "degenerate" with a blank reason: the arm is rejected
+    # for a plumbing fault nobody can see, and in a mutation harness it masquerades
+    # as evidence that a real rule is not load-bearing.
+    print('DEGENERATE: cannot import jsonobj from PYTHONPATH (%s)' % exc)
+    sys.exit(1)
 
 def load(p):
-    try:
-        return json.loads(open(p).read().strip())
-    except Exception:
-        return None
+    # The SAME parser arm.sh uses to extract its numbers, imported rather than
+    # re-typed: if the extractor and the rejection gate ever disagree about what
+    # parses, a measurement is either recorded unchecked or thrown away.
+    return jsonobj(p)
 
 bad = []
 c = load(os.environ['A_CONC_F'])

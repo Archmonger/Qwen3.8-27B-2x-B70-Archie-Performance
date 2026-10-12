@@ -19,9 +19,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fails=0
 ok(){ echo "  ok   $*"; }
 bad(){ echo "  FAIL $*"; fails=$((fails+1)); }
-chk(){ # label want-rc fn log arg
+chk(){ # label want-rc fn log arg [extra...]
   local label=$1 want=$2 fn=$3 log=$4 arg=$5 out rc
-  out=$($fn "$log" "$arg"); rc=$?
+  local -a extra=()
+  (( $# > 5 )) && extra=("${@:6}")
+  # Extras MUST be forwarded: a case like "explicit auto_want" otherwise exercises
+  # the default instead of the value it names, and passes for the wrong reason.
+  out=$($fn "$log" "$arg" "${extra[@]}"); rc=$?
   if [[ $rc -eq $want ]]; then ok "$label -> rc=$rc ($out)"
   else bad "$label -> rc=$rc, wanted $want ($out)"; fi
 }
@@ -55,8 +59,48 @@ chk "two tokens -> ambiguous    " 1 assert_dtype_applied "$T/two.log" float16
 chk "no token                   " 1 assert_dtype_applied "$T/none.log" float16
 chk "empty file                 " 1 assert_dtype_applied "$T/empty.log" float16
 chk "missing file               " 1 assert_dtype_applied "$T/nope.log" float16
-chk "unpinned -> skip, no check " 0 assert_dtype_applied "$T/none.log" ""
-chk "auto pin -> skip           " 0 assert_dtype_applied "$T/none.log" auto
+# An unpinned arm is the CONTROL, not an unchecked arm. These are the cases that
+# used to return 0 unconditionally -- a control that came up at float16 would have
+# recorded gate=PASS and the A/B would have silently compared fp16 to fp16. The
+# decisive one is "unpinned but fp16 booted": it is the only case that distinguishes
+# the control default from an early return.
+chk "unpinned, real bf16 log     " 0 assert_dtype_applied "$T/bf16.log" ""
+chk "auto pin, real bf16 log     " 0 assert_dtype_applied "$T/bf16.log" auto
+chk "unpinned but fp16 booted    " 1 assert_dtype_applied "$T/fp16.log" ""
+chk "explicit auto_want honoured " 0 assert_dtype_applied "$T/fp16.log" "" float16
+# The profile-facing route: an unpinned arm whose baseline legitimately resolves to
+# float16 declares it instead of being forced to pin a dtype. Without this, the only
+# way to express "auto should be float16 here" is a positional that arm.sh does not
+# pass, and the control would abort for a reason the caller cannot fix.
+envchk(){ # label want-rc fn log DTYPE_AUTO_EXPECT-value
+  local label=$1 want=$2 fn=$3 log=$4 dva=$5 out rc
+  out=$(DTYPE_AUTO_EXPECT="$dva" "$fn" "$log" ""); rc=$?
+  if [[ $rc -eq $want ]]; then ok "$label -> rc=$rc ($out)"
+  else bad "$label -> rc=$rc, wanted $want ($out)"; fi
+}
+envchk "DTYPE_AUTO_EXPECT=float16 on fp16 log" 0 assert_dtype_applied "$T/fp16.log" float16
+envchk "DTYPE_AUTO_EXPECT=bf16 on fp16 log  " 1 assert_dtype_applied "$T/fp16.log" bfloat16
+# An explicit positional must still win over the env default, or a profile default
+# would silently override a one-off arm. The log is bfloat16 and the env says float16:
+# only a positional bfloat16 can make this pass, so the case really does distinguish
+# the two sources (with a float16 log both answers would be 0 and prove nothing).
+# `VAR=v out=$(cmd)` would NOT work here: that is two assignments, so VAR leaks into
+# this shell instead of scoping to the call. Subshell + explicit export, same rule as
+# mcheck() in arm-cases.sh.
+if ( export DTYPE_AUTO_EXPECT=float16
+     assert_dtype_applied "$T/bf16.log" "" bfloat16 >/dev/null 2>&1 ); then
+  ok "positional auto_want beats DTYPE_AUTO_EXPECT"
+else
+  bad "positional auto_want did not beat DTYPE_AUTO_EXPECT"
+fi
+# And the env value must be consulted when no positional is given, or the whole knob
+# is decoration. Same bf16 log, env says float16, no positional: must reject.
+if ( export DTYPE_AUTO_EXPECT=float16
+     assert_dtype_applied "$T/bf16.log" "" >/dev/null 2>&1 ); then
+  bad "DTYPE_AUTO_EXPECT was ignored -- unpinned arm accepted a dtype it does not expect"
+else
+  ok "DTYPE_AUTO_EXPECT is consulted with no positional"
+fi
 
 echo
 echo "=== ssm: the engine warning is the only available signal ==="
@@ -76,7 +120,24 @@ echo "=== mutations: each rule must be load-bearing ==="
 # reports the mutant's verdict through its exit status, and the parent decides.
 mut(){ # label sed-expr fn log arg
   local label=$1 expr=$2 fn=$3 log=$4 arg=$5
-  sed "$expr" "$HERE/../lib/engage.sh" > "$T/eng.sh"
+  # Two guards, because a mutation that silently fails to apply is worse than no
+  # harness at all: the mutant behaves exactly like the original, the case reports
+  # "still rejected", and a real rule gets reported as NOT load-bearing on the
+  # strength of a sed that did nothing.
+  #  * sed's exit status. A malformed expression (an s command whose delimiter also
+  #    appears unescaped in the pattern or replacement is the usual one) makes sed
+  #    write nothing, leaving $T/eng.sh as the PREVIOUS mutant. The run then tests
+  #    that earlier mutation and can print a completely convincing PASS.
+  #  * a byte-difference check, which catches a well-formed expression that simply
+  #    matches nothing, e.g. after the line under test was reworded.
+  if ! sed "$expr" "$HERE/../lib/engage.sh" > "$T/eng.sh" 2>"$T/eng.sed.err"; then
+    bad "MUTATION $label: sed failed -- $(head -1 "$T/eng.sed.err")"
+    return
+  fi
+  if cmp -s "$T/eng.sh" "$HERE/../lib/engage.sh"; then
+    bad "MUTATION $label: sed matched nothing -- the mutant IS the original, verdict meaningless"
+    return
+  fi
   if ( . "$T/eng.sh"; "$fn" "$log" "$arg" >/dev/null 2>&1 ); then
     ok "MUTATION $label: goes blind without this rule"
   else
@@ -87,6 +148,11 @@ mut "dtype comparison bypassed " 's/if \[\[ "\$have" != "dtype=torch.\$want" \]\
     assert_dtype_applied "$T/bf16.log" float16
 mut "unprovable claimed as ok  " 's/^    return 2$/    return 0/' \
     assert_ssm_applied "$T/fp16.log" float32
+# Without the control-arm default, an unpinned arm returns 0 unconditionally and a
+# float16 control passes as a baseline. This is the case that keeps that line from
+# being "simplified" back into an early return.
+mut "control assertion skipped " 's|\[\[ -n "\$want" && "\$want" != auto \]\] \|\| want=\$auto_want|[[ -n "$want" \&\& "$want" != auto ]] \|\| return 0|' \
+    assert_dtype_applied "$T/fp16.log" ""
 # The empty-file guard is DEFENSIVE too: removing it lets the count check reject
 # the same file anyway, so it is not verdict-changing. Pin that its message is the
 # one a reader actually gets, so the branch cannot be deleted silently.

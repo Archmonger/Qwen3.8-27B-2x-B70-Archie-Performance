@@ -3,7 +3,13 @@
 # scripts/falsify/arm-cases.sh.
 #
 # Usage:  source scripts/lib/engage.sh
-#         assert_dtype_applied <engine-log> <want-dtype>      # "" / auto = skip
+#         assert_dtype_applied <engine-log> <want-dtype> [expected-when-auto]
+#           -> with a pin, the banner must match it. With no pin (the control arm),
+#              the banner must match expected-when-auto, which defaults to
+#              bfloat16: an unasserted control is not a control. Skipping the check
+#              whenever DTYPE is unset would let a control that came up at
+#              float16 record gate=PASS, collapsing the A/B into two identical
+#              arms that still produce a confident delta.
 #         assert_ssm_applied   <engine-log> <want-ssm>         # "" / auto = skip
 #           -> print one line on stdout, return 0 when the knob provably reached
 #              the engine, 1 when it did not.
@@ -31,8 +37,24 @@
 #     than 0, so callers cannot mistake an unprovable claim for a verified one.
 
 assert_dtype_applied(){
-  local L=${1:?engine log} want=${2:-}
-  [[ -n "$want" && "$want" != auto ]] || return 0
+  local L=${1:?engine log} want=${2:-} auto_want=${3:-${DTYPE_AUTO_EXPECT:-bfloat16}}
+  # No pin means this is the control arm, and its whole job is to be the unmodified
+  # baseline. Asserting nothing there would let a control that came up at float16
+  # record gate=PASS, so the "delta" would be two identical arms -- the same
+  # silent-identical-A/B failure that the profile-overriding-PORT bug produced.
+  #
+  # What an unpinned arm SHOULD be is a property of the profile, not of this
+  # function, so the value is not hard-coded here. bfloat16 is the default because
+  # that is what vLLM resolves `auto` to for the FP8 checkpoint, confirmed against the
+  # recorded control logs rather than inferred. A profile whose unmodified baseline
+  # legitimately resolves to something else sets DTYPE_AUTO_EXPECT -- an arm knob, so
+  # arm.sh admits it through the profile-derived allowlist -- instead of being forced
+  # to pin a dtype just to satisfy the checker. Do not "simplify" this back to a
+  # constant: an expectation a caller cannot express is an expectation that gets
+  # bypassed. (The INT4 profile cannot reach this path today: profiles/int4/ ships no
+  # .env, so arm.sh exits before the assertion runs. That is a reason the default is
+  # unexercised, not evidence that it is right for a future INT4 profile.)
+  [[ -n "$want" && "$want" != auto ]] || want=$auto_want
   if [[ ! -s "$L" ]]; then
     echo "assert_dtype_applied: log $L is empty or missing"; return 1
   fi

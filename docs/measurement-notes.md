@@ -292,6 +292,34 @@ for the switch that removes *just that path* and measure again. If the image exp
 no such switch, write that the mechanism is unresolved instead of publishing the
 correlation as the reason.
 
+### A harness fixture must have the shape of the real artifact
+
+Engagement checks read files, so the harnesses feed them fixtures. If a fixture is
+an *easier* version of the real file, the harness goes green against code that cannot
+parse reality. That happened while separating stdout from stderr in `bench/arm.sh`:
+the pipeline that flattened probe output was replaced with a single-line brace match,
+and every arm would have been discarded as unparseable, because `probe.py` prints
+**indented** JSON and a one-line `{.*}` match returns the lone character `{`. The
+falsification suite stayed green throughout, because every fixture in it was written
+as one-line JSON.
+
+Three consequences worth carrying forward:
+
+* When a parser is added or changed, at least one fixture must be the real artifact's
+  actual shape -- indented, surrounded by log lines, whatever the producer truly
+  emits. `falsify/arm-cases.sh` now pins the parser against probe.py's multi-line
+  form directly, not just against compact fixtures.
+* A parser must fail *loudly*. An import error or empty result that exits nonzero with
+  no message is indistinguishable from "this measurement is degenerate", so a plumbing
+  fault rejects a healthy boot and nobody can see why.
+* In a mutation harness, an environment variable must be `export`ed on its own
+  statement. `VAR=value . file` does not export `VAR` -- bash treats an assignment
+  preceding the source builtin as a plain shell variable and rolls it back when the
+  source returns. A mutant that dies on a missing variable reports "still rejected",
+  which the harness then reads as "this rule is not load-bearing": a verdict about the
+  mutation caused entirely by the harness. The same failure mode as an unwired
+  assertion, but it looks like evidence rather than silence.
+
 ## The INT4 placeholder cells
 
 The INT4 table in the README is empty on purpose. Until those cells are filled from a

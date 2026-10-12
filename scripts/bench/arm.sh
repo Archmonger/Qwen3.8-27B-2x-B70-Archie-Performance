@@ -40,6 +40,11 @@
 #
 # Recognised (non-passthrough) keys:
 #   DTYPE=float16               append --dtype <v>
+#   DTYPE_AUTO_EXPECT=float16   for an UNPINNED arm, what `auto` must resolve to.
+#                               Defaults to bfloat16; a profile whose baseline
+#                               legitimately resolves elsewhere sets this instead of
+#                               being forced to pin a dtype to satisfy the checker.
+#                               Arm-only: never reaches the container.
 #   MAMBA_SSM=float16           append --mamba-ssm-cache-dtype <v>
 #   KVDT=fp8|auto|...           override the profile's KV_CACHE_DTYPE
 #   NEEDLE=regex                engine log/census MUST match (engagement proof)
@@ -167,10 +172,17 @@ DRAFTER_SRC=$DRAFTER_DIR
 # override list above), and clearing it here would drop it -- an fp16 arm would
 # silently boot at the profile's bfloat16 and be recorded as an fp16 result.
 DTYPE=${DTYPE:-}; MAMBA_SSM=""; KVDT=${KV_CACHE_DTYPE:-fp8}
+# Arm-only, like MAMBA_SSM/NEEDLE: it names what an unpinned arm is expected to
+# resolve to, so the container has no use for it and it must not ride along in
+# PASS_ENV as an env var nothing reads. Unlike MAMBA_SSM it is NOT cleared to empty
+# here, because a profile may have set it via the profile env file; an explicit
+# arm-level value wins, as it does for DTYPE.
+DTYPE_AUTO_EXPECT=${DTYPE_AUTO_EXPECT:-}
 NEEDLE=""; NEEDLE_ABSENT=""; PROBES=""; PASS_ENV=()
 for kv in "$@"; do
   case "$kv" in
     DTYPE=*)         DTYPE=${kv#*=} ;;
+    DTYPE_AUTO_EXPECT=*) DTYPE_AUTO_EXPECT=${kv#*=} ;;
     MAMBA_SSM=*)     MAMBA_SSM=${kv#*=} ;;
     KVDT=*)          KVDT=${kv#*=} ;;
     NEEDLE=*)        NEEDLE=${kv#*=} ;;
@@ -189,20 +201,47 @@ done
 # same names the override loop above accepts), one of the arm-only knobs, or the
 # engine's own VLLM_* / DISABLE_ESIMD_* environment. Nothing else is legitimate.
 # Kept beside the override list on purpose: add a knob in one place, add it here.
-ARM_KNOWN="IMAGE CEILING GPU_MEM_UTIL MAX_NUM_SEQS MAX_MODEL_LEN MODELS_DIR
-TARGET_DIR DRAFTER_DIR CACHE_DIR PORT NUM_SPEC_TOKENS KV_CACHE_DTYPE SPEC
-COMPILE XPU_GRAPH PREFIX_CACHE DTYPE MAMBA_SSM_CACHE_DTYPE EXTRA_VLLM_ARGS
-RUNSTATE_DIR PROFILE DTYPE_ARGS MAMBA_SSM KVDT NEEDLE NEEDLE_ABSENT PROBES
+# The list is DERIVED, not typed out. A hand-maintained copy here drifted from the
+# override loop above within one revision: it omitted real profile knobs (TP_SIZE,
+# SPEC_METHOD, MAX_NUM_BATCHED_TOKENS, KV_OFFLOAD_SIZE, WARMUP, SERVED_NAME), which
+# meant a legitimate arm was refused, while also containing MAMBA_SSM_CACHE_DTYPE
+# -- and admitting that spelling is worse than a mere false refusal. The parser
+# only reads MAMBA_SSM=, so a caller who passes MAMBA_SSM_CACHE_DTYPE= gets the
+# flag into the container (ENVARGS is appended after the fixed -e pair) while
+# $MAMBA_SSM stays empty, and the engagement assertion silently skips. That is a
+# live, unasserted dtype arm: exactly the failure the assertion exists to catch,
+# reintroduced through the allowlist that was supposed to close the last one.
+# So: profile keys, then the override-loop names, then arm-only names; and the two
+# engine-dtype spellings are refused outright in favour of the asserted route.
+ARM_KNOWN="DTYPE MAMBA_SSM KVDT NEEDLE NEEDLE_ABSENT PROBES DTYPE_AUTO_EXPECT \
+IMAGE CEILING GPU_MEM_UTIL MAX_NUM_SEQS MAX_MODEL_LEN MODELS_DIR \
+TARGET_DIR DRAFTER_DIR CACHE_DIR PORT NUM_SPEC_TOKENS KV_CACHE_DTYPE \
+SPEC COMPILE XPU_GRAPH PREFIX_CACHE EXTRA_VLLM_ARGS RUNSTATE_DIR \
 ARM_CHECK_ONLY ARM_ROWS ARM_OUT_DIR ARM_BOOT_TIMEOUT W57_HOLD DEVICES_ENV"
+if [[ -f "$PROFILE_ENV" ]]; then
+  # Only the KEY part of each KEY=VALUE line; comments and blanks excluded.
+  ARM_KNOWN="$ARM_KNOWN $(sed -n 's/^[[:space:]]*\([A-Z_][A-Z0-9_]*\)=.*/\1/p' "$PROFILE_ENV" | sort -u | tr '\n' ' ')"
+fi
 for _kv in ${PASS_ENV[@]+"${PASS_ENV[@]}"}; do
   _k=${_kv%%=*}
+  # The dtype knobs have exactly one admitted spelling each, because that is the
+  # spelling the engagement assertion reads. Accepting the other would let the
+  # flag reach the container with nothing proving it applied.
+  case "$_k" in
+    MAMBA_SSM_CACHE_DTYPE)
+      echo "arm: use MAMBA_SSM=... instead of MAMBA_SSM_CACHE_DTYPE= -- the latter sets the container env but leaves the assertion blind, which is how an unasserted dtype arm gets recorded" >&2
+      exit 2 ;;
+    DTYPE_ARGS)
+      echo "arm: DTYPE_ARGS is a scripts/serve.sh internal, not a knob -- pass DTYPE= instead" >&2
+      exit 2 ;;
+  esac
   case "$_k" in
     VLLM_*|DISABLE_ESIMD_*) continue ;;
   esac
   _found=0
   for _n in $ARM_KNOWN; do [[ "$_n" == "$_k" ]] && { _found=1; break; }; done
   [[ $_found -eq 1 ]] && continue
-  echo "arm: unrecognized argument '$_kv'. Arm knobs are DTYPE= MAMBA_SSM= KVDT= NEEDLE= NEEDLE_ABSENT= PROBES=; profile variables are listed in ARM_KNOWN; extra engine env must be VLLM_* or DISABLE_ESIMD_*" >&2
+  echo "arm: unrecognized argument '$_kv'. Arm knobs are DTYPE= MAMBA_SSM= KVDT= NEEDLE= NEEDLE_ABSENT= PROBES=, any variable your profile env sets, or engine env prefixed VLLM_*/DISABLE_ESIMD_*" >&2
   exit 2
 done
 unset _kv _k _n _found
@@ -339,6 +378,15 @@ timeout "${ARM_BOOT_TIMEOUT:-2700}" docker run -d --name "$CTR" \
 
 L=$O/${LABEL}.engine.log
 RAW=$O/${LABEL}.raw.log
+# Delete both before anything is measured, not merely truncate them inside snap().
+# $O is reused across runs and $LABEL names the file, so a re-run of a label starts
+# with the previous run's log already on disk. snap() does overwrite both, but the
+# engagement assertions downstream read $L, and any path where snap() is skipped or
+# dies mid-way (docker inspect failing, the EXIT trap firing early) would leave an
+# earlier boot's banner standing in for this one -- an arm labelled fp16 could be
+# "proved" fp16 by a log it did not write. Removing them up front makes the worst
+# case an absent log, which assert_dtype_applied fails closed on.
+rm -f "$L" "$RAW"
 snap(){
   # Timestamped raw copy, then boot-sliced into $L the way verify.sh does it:
   # the fatal-signature rule scans whatever log it is handed, so an unslliced log
@@ -414,7 +462,7 @@ say "healthy +$((j*3))s ceil=${ceil:-?} ladder_max=${maxsize:-?} capture=${cap:-
 # at bfloat16 would otherwise record gate=PASS under an fp16 label with plausible
 # numbers. Both checks live in scripts/lib/engage.sh so the falsification harness
 # exercises the same code the live path runs.
-if ! msg=$(assert_dtype_applied "$L" "$DTYPE"); then
+if ! msg=$(assert_dtype_applied "$L" "$DTYPE" "${DTYPE_AUTO_EXPECT:-}"); then
   say "ABORT DTYPE: $msg -- the knob did not apply"
   row "dtype-not-applied:${DTYPE}" "${PASS_ENV[*]:-}"; exit 1
 fi
@@ -476,27 +524,55 @@ GATE=PASS
 
 # --- throughput at the MAX_NUM_SEQS cap, canonical budget --------------------
 capn=${MAX_NUM_SEQS:-10}; midn=$((capn/2)); [[ $midn -ge 1 ]] || midn=1
-conc=$(timeout 1800 python3 "$HERE/conc.py" --port "$ARM_PORT" --model "$MNAME" \
-        --cells "$capn:$((capn*3)),$midn:$((midn*4)),1:6" --json 2>&1 | tail -1)
+# stdout and stderr are captured separately, not merged. Merging meant any late
+# stderr line (a urllib warning at interpreter shutdown, a driver notice) landed
+# after the JSON and the capture stopped being one parsable object. That fails
+# CLOSED -- the degeneracy gate rejects the arm -- but it rejects a healthy boot,
+# which is the expensive failure: a whole boot of measurement discarded for a
+# warning. So stderr goes to its own file, kept for the post-mortem.
+#
+# jsonobj extracts the payload from that raw stdout capture. It is NOT `grep -o
+# '{.*}'`: probe.py prints INDENTED json, so a single-line brace match returns the
+# lone character "{" and the arm looks unparseable. The previous code got away with
+# it because `2>&1 | tr -d '\n'` flattened the pretty-print as a side effect. Every
+# '{' is a candidate start and the first that decodes wins, so a diagnostic line
+# ahead of a good payload no longer rejects the arm. The implementation lives in
+# scripts/bench/jsonobj.py and scripts/lib/degenerate.sh imports the same function,
+# so the extractor and the rejection gate cannot disagree about what parses.
+jsonobj(){ python3 -c "
+import json, sys
+sys.path.insert(0, '$HERE')
+from jsonobj import jsonobj
+o = jsonobj(sys.argv[1])
+if o is None:
+    sys.exit(1)
+print(json.dumps(o))" "$1" 2>/dev/null; }
+timeout 1800 python3 "$HERE/conc.py" --port "$ARM_PORT" --model "$MNAME" \
+        --cells "$capn:$((capn*3)),$midn:$((midn*4)),1:6" --json \
+        >"$O/${LABEL}.conc.json" 2>"$O/${LABEL}.conc.err"
+conc=$(jsonobj "$O/${LABEL}.conc.json")
 say "conc: $conc"
 grep -q '"conc10"' <<<"$conc" || { say "INVALID: conc10 missing"; row conc-probe; exit 1; }
-printf '%s\n' "$conc" > "$O/${LABEL}.conc.json"
 
 # --- single-stream probes (same harness as the recorded rows) ----------------
 C1_ITERS=10; C1_WARM=3; NAT_ITERS=6; NAT_WARM=2
-c1=$(timeout 300 python3 "$HERE/probe.py" --url "http://127.0.0.1:$ARM_PORT/v1/completions" \
+# Same separation, and the same reason: probe.py sends per-iteration errors to
+# stderr, where they now stay instead of being glued onto the JSON.
+timeout 300 python3 "$HERE/probe.py" --url "http://127.0.0.1:$ARM_PORT/v1/completions" \
       --model "$MNAME" --prompt "1 2" --max-tokens 16 --iters "$C1_ITERS" --warmup "$C1_WARM" \
-      --label C1 2>&1 | tr -d '\n')
-nat=$(timeout 300 python3 "$HERE/probe.py" --url "http://127.0.0.1:$ARM_PORT/v1/completions" \
+      --label C1 >"$O/${LABEL}.c1raw.json" 2>"$O/${LABEL}.c1raw.err"
+timeout 300 python3 "$HERE/probe.py" --url "http://127.0.0.1:$ARM_PORT/v1/completions" \
       --model "$MNAME" --prompt "$(cat "$HERE/../../data/prompt-planning.txt")" \
-      --max-tokens 96 --iters "$NAT_ITERS" --warmup "$NAT_WARM" --label NAT 2>&1 | tr -d '\n')
-printf '%s\n' "$c1"  > "$O/${LABEL}.c1raw.json"
-printf '%s\n' "$nat" > "$O/${LABEL}.natraw.json"
+      --max-tokens 96 --iters "$NAT_ITERS" --warmup "$NAT_WARM" --label NAT \
+      >"$O/${LABEL}.natraw.json" 2>"$O/${LABEL}.natraw.err"
+c1=$(jsonobj "$O/${LABEL}.c1raw.json")
+nat=$(jsonobj "$O/${LABEL}.natraw.json")
+[[ -n "$c1" ]] || say "WARN: C1 probe produced no parsable object (see ${LABEL}.c1raw.err)"
+[[ -n "$nat" ]] || say "WARN: NAT probe produced no parsable object (see ${LABEL}.natraw.err)"
 
-pj(){ python3 -c "import json,sys
-t=sys.stdin.read(); i=t.find('{')
-try: print(json.dumps(json.loads(t[i:])))
-except Exception: print('null')" <<<"$1"; }
+pj(){ # already-compact JSON in, compact JSON or null out
+  if [[ -n "${1:-}" ]]; then printf '%s' "$1"; else printf 'null'; fi
+}
 
 # --- refuse to record an arm whose measurements did not actually happen --------
 # The rules live in scripts/lib/degenerate.sh so the falsification harness tests
