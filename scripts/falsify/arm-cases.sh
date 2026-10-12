@@ -61,7 +61,24 @@ need_python(){ command -v python3 >/dev/null 2>&1 || { echo "  SKIP python3 not 
 # through the two overrides arm.sh documents -- DEVICES_ENV and an absolute
 # RUNSTATE_DIR (both are in its caller-override list, which is what makes them
 # survive the profile sourcing being tested in case 1).
-T=$(mktemp -d); trap 'rm -rf "$T" "$REPO/profiles/w57-nofp" "$HERE/../bench/arm-mut.'"$$"'.sh' EXIT
+# Cleanup is a FUNCTION, and runs on EXIT *and* INT/TERM.
+#
+# Two separate reasons it is shaped this way:
+#   * A Ctrl-C during a long run must not leave the arm.sh mutant in
+#     scripts/bench/. It has to live beside arm.sh (arm.sh resolves
+#     lib/profile-env.sh from BASH_SOURCE), so it is not inside $T and an
+#     EXIT-only trap only helps if bash reaches an exit normally.
+#   * Interpolating the mutant path into a trap STRING does not survive quoting:
+#     `trap 'rm -rf "x.'"$$"'.sh"' EXIT` opens a quote that the expansion never
+#     closes, and bash reports `unexpected EOF while looking for matching "` at
+#     the first signal. That was the shape here, and it was silently doing no
+#     cleanup at all -- verified on the host by touching the file, signalling
+#     the script, and seeing the file still there. A function needs no quoting.
+MUT="$HERE/../bench/arm-mut.$$.sh"
+T=$(mktemp -d)
+w57_cleanup(){ rm -rf "$T" "$REPO/profiles/w57-nofp" "$MUT"; }
+trap w57_cleanup EXIT
+trap 'trap - EXIT; w57_cleanup; exit 130' INT TERM
 [[ -f "$REPO/profiles/fp8/fp8.env" ]] || { echo "  FAIL: no profiles/fp8/fp8.env"; exit 1; }
 mkdir -p "$T/runstate/dri-by-path"
 
@@ -122,9 +139,8 @@ if [[ "${SKIP_DEV:-0}" != 1 ]]; then
   # lib/profile-env.sh relative to BASH_SOURCE, so a copy under $T cannot even
   # load its profile parser (which is exactly the class of harness bug that
   # reports "still rejected" for a rule that is load-bearing). It is invoked as
-  # `bash "$MUT"`, so the 644 a redirection creates does not matter, and the
-  # harness EXIT trap removes it.
-  MUT="$HERE/../bench/arm-mut.$$.sh"
+  # `bash "$MUT"`, so the 644 a redirection creates does not matter, and
+  # w57_cleanup removes it on every exit path. $MUT is defined up with the trap.
   if ! sed 's/^DTYPE=${DTYPE:-}; MAMBA_SSM=${MAMBA_SSM_CACHE_DTYPE:-};/DTYPE=${DTYPE:-}; MAMBA_SSM="";/' \
        "$ARM" > "$MUT" 2>"$T/mutseed.sed.err"; then
     bad "MUTATION profile ssm seed reverted: sed failed -- $(head -1 "$T/mutseed.sed.err")"
