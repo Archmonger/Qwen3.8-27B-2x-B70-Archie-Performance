@@ -61,7 +61,7 @@ need_python(){ command -v python3 >/dev/null 2>&1 || { echo "  SKIP python3 not 
 # through the two overrides arm.sh documents -- DEVICES_ENV and an absolute
 # RUNSTATE_DIR (both are in its caller-override list, which is what makes them
 # survive the profile sourcing being tested in case 1).
-T=$(mktemp -d); trap 'rm -rf "$T" "$REPO/profiles/w57-nofp"' EXIT
+T=$(mktemp -d); trap 'rm -rf "$T" "$REPO/profiles/w57-nofp" "$HERE/../bench/arm-mut.'"$$"'.sh' EXIT
 [[ -f "$REPO/profiles/fp8/fp8.env" ]] || { echo "  FAIL: no profiles/fp8/fp8.env"; exit 1; }
 mkdir -p "$T/runstate/dri-by-path"
 
@@ -104,6 +104,45 @@ if [[ "${SKIP_DEV:-0}" != 1 ]]; then
   grep -q "dtype=float16" <<<"$out" \
     && ok "positional KEY=VAL beats the environment" \
     || bad "positional override lost to the environment: $out"
+
+  # --- 1b. profile-pinned dtype knobs ---------------------------------------
+  # fp8.env now SHIPS DTYPE and MAMBA_SSM_CACHE_DTYPE pins, and arm.sh seeds
+  # $MAMBA_SSM from the profile pin. Without the seed, serve.sh still emits
+  # --mamba-ssm-cache-dtype from the container env while $MAMBA_SSM stays empty,
+  # so assert_ssm_applied skips itself on every profile-default arm -- an
+  # unasserted dtype claim on the baseline itself. This is the hole the
+  # MAMBA_SSM_CACHE_DTYPE refusal closed for arm arguments, reopened by the
+  # profile file; the seed closes it again and this case keeps it closed.
+  out=$(rig env MAMBA_SSM_CACHE_DTYPE=bfloat16 bash "$ARM" CHECK 8199 2>&1)
+  grep -q "ssm=bfloat16" <<<"$out" \
+    && ok "profile-pinned MAMBA_SSM_CACHE_DTYPE is seeded into the asserted ssm value" \
+    || bad "profile ssm pin not seeded (assertion would skip on every default arm): $out"
+
+  # The mutant must sit in arm.sh's OWN directory: arm.sh resolves
+  # lib/profile-env.sh relative to BASH_SOURCE, so a copy under $T cannot even
+  # load its profile parser (which is exactly the class of harness bug that
+  # reports "still rejected" for a rule that is load-bearing). Same filesystem,
+  # mode preserved, removed with the trap.
+  MUT="$HERE/../bench/arm-mut.$$.sh"
+  if ! sed 's/^DTYPE=${DTYPE:-}; MAMBA_SSM=${MAMBA_SSM_CACHE_DTYPE:-};/DTYPE=${DTYPE:-}; MAMBA_SSM="";/' \
+       "$ARM" > "$MUT" 2>"$T/mutseed.sed.err"; then
+    bad "MUTATION profile ssm seed reverted: sed failed -- $(head -1 "$T/mutseed.sed.err")"
+  elif cmp -s "$MUT" "$ARM"; then
+    bad "MUTATION profile ssm seed reverted: sed matched nothing -- mutant IS the original"
+  else
+    out=$(rig env MAMBA_SSM_CACHE_DTYPE=bfloat16 bash "$MUT" CHECK 8199 2>&1)
+    rm -f "$MUT"
+    grep -q "ssm=profile" <<<"$out" \
+      && ok "MUTATION profile ssm seed reverted: pin vanishes from the assertion -- rule is load-bearing" \
+      || bad "MUTATION profile ssm seed reverted: still asserted ($out) -- the case above does not depend on the seed"
+  fi
+
+  # An explicit auto restores the omitted-flag control arm and must be VISIBLE as
+  # auto, not collapse to the empty skip that prints "profile".
+  out=$(rig bash "$ARM" CHECK 8199 MAMBA_SSM=auto 2>&1)
+  grep -q "ssm=auto" <<<"$out" \
+    && ok "MAMBA_SSM=auto is a visible control spelling, not an empty skip" \
+    || bad "MAMBA_SSM=auto not honoured: $out"
 fi
 
 # --- 2. the fatal pattern must fail both ways --------------------------------

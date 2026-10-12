@@ -171,13 +171,32 @@ DRAFTER_SRC=$DRAFTER_DIR
 # Not `DTYPE=`: the caller may have set DTYPE in the environment (it is in the
 # override list above), and clearing it here would drop it -- an fp16 arm would
 # silently boot at the profile's bfloat16 and be recorded as an fp16 result.
-DTYPE=${DTYPE:-}; MAMBA_SSM=""; KVDT=${KV_CACHE_DTYPE:-fp8}
+# MAMBA_SSM is seeded from MAMBA_SSM_CACHE_DTYPE for the same reason now that
+# profiles/fp8/fp8.env pins both: the profile reaches the container through the
+# env var, and if $MAMBA_SSM stayed empty the engagement assertion would skip on
+# every profile-default arm -- an unasserted dtype claim on the baseline itself.
+# Seeding keeps the asserted knob and the flag the container actually got the same
+# value. An explicit MAMBA_SSM=... argument still wins below, and MAMBA_SSM=auto
+# restores the omitted-flag control arm.
+DTYPE=${DTYPE:-}; MAMBA_SSM=${MAMBA_SSM_CACHE_DTYPE:-}; KVDT=${KV_CACHE_DTYPE:-fp8}
 # Arm-only, like MAMBA_SSM/NEEDLE: it names what an unpinned arm is expected to
 # resolve to, so the container has no use for it and it must not ride along in
 # PASS_ENV as an env var nothing reads. Unlike MAMBA_SSM it is NOT cleared to empty
 # here, because a profile may have set it via the profile env file; an explicit
 # arm-level value wins, as it does for DTYPE.
+# Its FALLBACK is the profile's own DTYPE pin: with profiles/fp8/fp8.env pinning
+# float16, an unpinned arm boots at float16 THROUGH THE PROFILE, and asserting
+# bfloat16 there would abort the only control that means anything for a candidate
+# measured against today's baseline (the engine came up at what the profile asked;
+# the assertion would be wrong, not the boot). The fallback applies only when the
+# profile value is an actual pin: a profile pinning `auto` must fall through to
+# engage.sh's bfloat16 floor, because comparing the banner against the literal
+# "auto" could never match anything. engage.sh keeps its own bfloat16 floor for
+# callers with no profile at all.
 DTYPE_AUTO_EXPECT=${DTYPE_AUTO_EXPECT:-}
+if [[ -z "$DTYPE_AUTO_EXPECT" ]]; then
+  case "$DTYPE" in ''|auto) ;; *) DTYPE_AUTO_EXPECT=$DTYPE ;; esac
+fi
 NEEDLE=""; NEEDLE_ABSENT=""; PROBES=""; PASS_ENV=()
 for kv in "$@"; do
   case "$kv" in
@@ -206,11 +225,14 @@ done
 # SPEC_METHOD, MAX_NUM_BATCHED_TOKENS, KV_OFFLOAD_SIZE, WARMUP, SERVED_NAME), which
 # meant a legitimate arm was refused, while also containing MAMBA_SSM_CACHE_DTYPE
 # -- and admitting that spelling is worse than a mere false refusal. The parser
-# only reads MAMBA_SSM=, so a caller who passes MAMBA_SSM_CACHE_DTYPE= gets the
-# flag into the container (ENVARGS is appended after the fixed -e pair) while
-# $MAMBA_SSM stays empty, and the engagement assertion silently skips. That is a
-# live, unasserted dtype arm: exactly the failure the assertion exists to catch,
-# reintroduced through the allowlist that was supposed to close the last one.
+# only reads MAMBA_SSM=, so a caller who passes MAMBA_SSM_CACHE_DTYPE= as an
+# ARM ARGUMENT gets the flag into the container through the pass-through env list
+# while $MAMBA_SSM was seeded from the profile, so the arm's real pin and the
+# asserted value can disagree. That is an unasserted dtype arm: exactly the
+# failure the assertion exists to catch, reintroduced through the allowlist that
+# was supposed to close the last one. (A profile env file may still set
+# MAMBA_SSM_CACHE_DTYPE: arm.sh seeds $MAMBA_SSM from it, so the profile pin is
+# asserted too. Only the positional-argument spelling is refused.)
 # So: profile keys, then the override-loop names, then arm-only names; and the two
 # engine-dtype spellings are refused outright in favour of the asserted route.
 ARM_KNOWN="DTYPE MAMBA_SSM KVDT NEEDLE NEEDLE_ABSENT PROBES DTYPE_AUTO_EXPECT \
@@ -248,8 +270,14 @@ unset _kv _k _n _found
 # The dtype knobs reach the launcher as the env vars scripts/serve.sh already
 # understands, NOT as extra argv: a second route to --dtype could emit the flag
 # twice, and the env route is the one that ships, so exercising it is the point.
-[[ -n "$DTYPE" ]] && export DTYPE
-[[ -n "$MAMBA_SSM" ]] && export MAMBA_SSM_CACHE_DTYPE="$MAMBA_SSM"
+# They ride along on the docker line EXPLICITLY and only when set (DTYPE_ENV):
+# an unconditional -e DTYPE="${DTYPE:-auto}" would pin auto onto every
+# profile-default arm and silently override the profile's pin -- the same
+# inert-knob failure in the other direction now that serve.sh defaults to
+# float16 and fp8.env pins both knobs.
+DTYPE_ENV=()
+[[ -n "$DTYPE" ]] && { export DTYPE; DTYPE_ENV+=(-e "DTYPE=$DTYPE"); }
+[[ -n "$MAMBA_SSM" ]] && { export MAMBA_SSM_CACHE_DTYPE="$MAMBA_SSM"; DTYPE_ENV+=(-e "MAMBA_SSM_CACHE_DTYPE=$MAMBA_SSM"); }
 
 say(){ echo "[$(date -u +%H:%M:%S)] [$LABEL] $*" | tee -a "$LOGF"; }
 row(){ # $1 = failure tag; anything after it is recorded as the arm's env.
@@ -371,9 +399,8 @@ timeout "${ARM_BOOT_TIMEOUT:-2700}" docker run -d --name "$CTR" \
   -e XPU_GRAPH="${XPU_GRAPH:-1}" -e SPEC="${SPEC:-1}" \
   -e NUM_SPEC_TOKENS="${NUM_SPEC_TOKENS:-7}" -e KV_CACHE_DTYPE="$KVDT" \
   -e CCL_SYCL_ALLREDUCE_TMP_BUF="${CCL_SYCL_ALLREDUCE_TMP_BUF:-1}" \
-  -e DTYPE="${DTYPE:-auto}" -e MAMBA_SSM_CACHE_DTYPE="${MAMBA_SSM_CACHE_DTYPE:-auto}" \
   -e EXTRA_VLLM_ARGS="--compilation-config $CEIL_JSON" \
-  "${ENVARGS[@]}" \
+  "${ENVARGS[@]}" "${DTYPE_ENV[@]+"${DTYPE_ENV[@]}"}" \
   --entrypoint /bin/bash "$IMAGE" /serve.sh >>"$LOGF" 2>&1
 
 L=$O/${LABEL}.engine.log

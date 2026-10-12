@@ -22,6 +22,8 @@ check that cannot fail is worse than no check: it produces confidence.
 | 15 correctness probes | the text is right | **the stride defect — invisible to every other check** |
 | acceptance windows | drafts are flowing and being accepted | spec decode silently disabled |
 | 5 serving-surface cells | thinking, tool calls, reasoning, usage details, code | a flag combination that breaks the chat template |
+| dtype engagement: exactly one `dtype=torch.X` in the banner, equal to the profile's `DTYPE` | the engine really came up at the shipped dtype | a compose interpolation that dropped the variable, an old `serve.sh` mounted, or an image that reverted the flag. Since the profile now **ships** `DTYPE=float16`, a silent failure here means the box runs the older baseline while every published number claims the faster one |
+| ssm-cache engagement (rc 2 printed, never counted) | `--mamba-ssm-cache-dtype` reached the engine, proven by the config warning it emits when it disagrees with the checkpoint | the same drop for the recurrent-state dtype. A pin equal to the checkpoint's own `float32` is **unprovable** and returns 2, so an unprovable claim cannot be read as a verified one |
 
 ## Prove your tests can fail
 

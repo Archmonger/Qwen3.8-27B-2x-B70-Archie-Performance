@@ -194,8 +194,12 @@ fi
 
 # --- activation / GDN-state dtype. W57 measured both knobs on this host against
 #     matched control boots. They are two different levers: DTYPE buys speed,
-#     MAMBA_SSM_CACHE_DTYPE buys KV capacity. Both default to the previously
-#     shipped behaviour, so the shipped command line is unchanged.
+#     MAMBA_SSM_CACHE_DTYPE buys KV capacity. Both default to float16 because
+#     this repo's rule is that the launcher default and the published numbers are
+#     the most optimized measured permutation, not the historical one. `auto`
+#     (what the launcher shipped with before this was measured) remains the
+#     documented control spelling: every A/B against the old baseline passes
+#     DTYPE=auto explicitly through scripts/bench/arm.sh.
 #
 # Measured (paired A/B on one rig via scripts/bench/arm.sh, shipped harnesses,
 # PROBES=instrument on both arms so neither pays probe overhead alone; two
@@ -212,6 +216,25 @@ fi
 #
 # Within-arm spread is 0.27-0.74 on C1 and 2.0-4.9 on the conc cells, so every
 # delta above is several times the spread. Quote them with the ranges, not alone.
+#
+# The attribution split (earlier run, same rig, same harness, probes mounted on
+# every arm; one launch per label except where a rep is shown. Its KV totals
+# differ from the table above by a few hundred tokens, ordinary boot-to-boot
+# variation) is what justifies defaulting BOTH knobs:
+#
+#   label        knobs                    conc=10          conc=5   GPU KV tokens
+#   CALIB2/3     defaults                224.18/224.02    156.37/155.31      384,956
+#   MAMBA16      ssm=float16 only            225.79         156.49           397,616
+#   FP16ONLY     DTYPE=float16 only     244.76/241.53    161.86/168.96       389,265
+#   FP16FULL     both          237.66/245.08/242.86     166.04/171.45        415,029
+#
+# DTYPE is where the speed is: ssm alone is 225.79 against a 224.10 control mean,
+# while DTYPE alone is 243.15 and both together 241.87. The two fp16 rows sit
+# inside each other's spread, so the ssm pin buys nothing on throughput and is
+# defaulted in for capacity only. Its capacity is also NOT additive -- +12,660
+# tokens alone, +30,073 alongside DTYPE, against a 384,956 control -- because the
+# pool is whatever memory is left divided by a per-token page size that both
+# dtypes move. Do not quote a per-knob token delta as if the two summed.
 #
 # WHY IT IS FASTER IS NOT ESTABLISHED, and an earlier revision of this comment was
 # wrong about it. It asserted the win came from two XPU fast paths gated on
@@ -293,12 +316,13 @@ fi
 # exact-answer battery on both with the SAME single miss (an intrinsic model error,
 # not a dtype one), 0/20 non-reproducible greedy outputs, and correctness 15/15
 # with the acceptance fingerprint unchanged at C1 26 169 7.500.
-DTYPE="${DTYPE:-auto}"
-MAMBA_SSM_CACHE_DTYPE="${MAMBA_SSM_CACHE_DTYPE:-auto}"
-# --dtype is always passed so the default command line stays byte-identical to
-# the one every recorded number was measured with. --mamba-ssm-cache-dtype is
-# omitted entirely when auto: handing vLLM a flag it would default anyway is
-# harmless here, but omitting it keeps the default argv unchanged.
+DTYPE="${DTYPE:-float16}"
+MAMBA_SSM_CACHE_DTYPE="${MAMBA_SSM_CACHE_DTYPE:-float16}"
+# --dtype is always passed; --mamba-ssm-cache-dtype is omitted entirely when auto.
+# With both defaults now float16 the default argv carries both flags -- the point
+# of the rule above is that the default IS the measured-best permutation, so do
+# not "restore the unchanged argv" by reverting these defaults; revert only if a
+# future measurement shows a different permutation wins.
 DTYPE_ARGS=(--dtype "$DTYPE")
 if [[ "$MAMBA_SSM_CACHE_DTYPE" != "auto" ]]; then
   DTYPE_ARGS+=(--mamba-ssm-cache-dtype "$MAMBA_SSM_CACHE_DTYPE")
