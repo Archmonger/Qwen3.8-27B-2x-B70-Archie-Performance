@@ -141,37 +141,6 @@ one that never stops inside its budget, so its figure is a cap.
 | Prompt Processing | 1 | — | **3 207** tok/s | `prefill.py --length-sweep` |
 | TTFT | 1 | — | **188.1** ms | `prefill.py --test …` (median over the four test prompts) |
 
-**Read the "Max Tokens" column before comparing this table against an older copy of
-it.** These cells were swept at the budget each test name pins, and `aggregate_tok_s`
-pays for uncounted prefill inside wall time, so a cell swept at a smaller budget
-understates the same engine — worst at high concurrency, worst for the large-budget
-tests. Two of the four tests above rose by about what the dtype change alone is worth
-(+8% at `conc=10`): **Counting** +8.5% and **Prose** +10.8%. The other two rose far
-more — **Coding** +49%, **Technical Planning** +24% — and are not a faster engine. Both
-are 2048-token tests, and a same-boot sweep of `coding` at the older
-`--max-tokens 256` measures **346** against that test's previous published **325.96**,
-which is most of the gap; `coding` on a `bfloat16` control arm at 256 lands **1.7%** off
-the published figure. The previous table was therefore not one protocol: some cells were
-swept at the budget in the column, others at `conc.py`'s then-default 256. The per-cell
-reconciliation, including which cells are still unexplained, is in
-[docs/measurement-notes.md](docs/measurement-notes.md).
-
-Concurrency is the number of requests in flight, capped by `MAX_NUM_SEQS`; the top cell
-of each test is the state a busy engine is actually in. `—` on the last two rows means
-the budget is not part of that metric: both are read from the first token of a stream,
-which does not depend on how many tokens are asked for afterwards.
-
-`--max-tokens` is part of the metric, not a knob: `aggregate_tok_s` moves ~15% between
-96 and 256 at `conc=10`, which is what once made a correct engine look ~13% depressed.
-What the spread actually is, how each number above was produced, why Prompt Processing
-has to be measured as a slope and not a ratio, which third-party numbers on this
-hardware are **not** parity targets, and which figures from the investigation were
-eager-era and are not comparable to anything above:
-[docs/measurement-notes.md](docs/measurement-notes.md). The checks that do not fit this
-table — acceptance length, correctness, serving surface, graph capture, soak, and the
-single-stream and realistic-suite probes — are in
-[docs/recorded-metrics.md](docs/recorded-metrics.md).
-
 ## Qwen3.8-27B-INT4 Recorded Performance Metrics
 
 > **PLACEHOLDER — this repo holds no INT4 measurement.**
