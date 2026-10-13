@@ -16,7 +16,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 fails=0
 for h in "$HERE"/verify-cases.sh "$HERE"/setup-guards.sh "$HERE"/acceptance-cases.sh \
-         "$HERE"/conc-cases.sh "$HERE"/prefill-cases.sh; do
+         "$HERE"/conc-cases.sh "$HERE"/prefill-cases.sh "$HERE"/arm-cases.sh \
+         "$HERE"/engage-cases.sh; do
   echo
   echo "################ $(basename "$h")"
   if timeout 1800 bash "$h"; then

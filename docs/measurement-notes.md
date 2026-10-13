@@ -176,6 +176,54 @@ the GPU perf/OA unit open was blamed for the depression, then cleared — it sta
 Oct 3, so it was also running during the Oct 7 run that recorded 227.13 and cannot
 explain a delta between the two. The real cause was in the harness all along.
 
+## The 2026-10-12 re-measurement: two tests moved as expected, two did not
+
+The grid was re-swept on the shipped `float16` default, 3 reps per cell, one attested
+boot (`VERIFY: PASS`, `dtype=torch.float16`, `ssm engagement ok (float16)`, correctness
+15/15). Compared against the table it replaced, the four tests did not move together:
+
+| test | previous | now | change | dtype alone predicts |
+|---|---:|---:|---:|---:|
+| Counting (512) | 675.59 | 732.91 | **+8.5%** | +8% — matches |
+| Prose (2048) | 210.50 | 233.30 | **+10.8%** | +8% — close |
+| Technical Planning (2048) | 239.70 | 297.95 | **+24.3%** | +8% — 3x too small |
+| Coding (2048) | 325.96 | 485.90 | **+49.0%** | +8% — 6x too small |
+
+One change to the engine cannot move two tests by 8% and two by 24–49%, so the two large
+cells were not comparable to the two small ones. `--max-tokens` is the known cause of
+exactly this shape (section above), and it fits the two big cells:
+
+* Sweeping `coding` at **256** on the shipped float16 default gives **346.02** conc10,
+  against the previous published **325.96**.
+* Sweeping `coding` at 256 on a **bfloat16** control arm (`DTYPE=auto`, banner confirmed
+  `dtype=torch.bfloat16`, KV back to 384,956 tokens) gives **331.72** — **1.7%** off the
+  published figure. That is the previous cell, reproduced.
+* Sweeping `planning` at 256 on the same control gives **227.94**, **5.2%** off its
+  published 239.70.
+* Sweeping `prose` at 256 on the same control gives **174.57** — **20.6% below** its
+  published 210.50. Sweeping `counting` at 256 gives **590.49**, **14.4% below** its
+  published 675.59.
+
+So the previous table was **not one protocol**: `coding` and `planning` read like a sweep
+at the old `--max-tokens 256` default that got published with the canonical budget in the
+column, while `prose` and `counting` were genuinely swept at their canonical budgets and
+rose by about the dtype delta. The 2048-token tests were the ones exposed to the budget
+bug, which is also the direction the mechanism predicts.
+
+**What is not established.** The previous table's provenance could not be recovered: a
+recursive search of `/root` for the four published conc10 values hits only unrelated
+binary caches, so no surviving session log records what was swept. The account above is
+therefore inference from reproduction, not a record of what was run. Two cells reproduce
+a 256 sweep within 5%; the other two reproduce neither a 256 sweep nor a canonical sweep,
+and their previous values sit between the two. Session drift is a plausible contributor —
+this host drifts ~5% per 10 boots and those cells had no calibration arm — but 14–20% is
+more than that explains. Do not reconstruct those cells from this section; the values now
+published are the ones with a surviving log and an attested boot.
+
+The rule this enforces, restated because it was broken by the tooling rather than by
+carelessness: **a published cell has to name every parameter that moves it, and a table
+whose rows came from different sweeps is not comparable even when every row is correct.**
+
 ## The two measurements that changed the number
 
 1. **`MAX_NUM_SEQS x (1+k)` is the graph ceiling, and 72 was wrong.** A decode step
@@ -215,7 +263,8 @@ same era.
 ## Quote the era and the metric name with every number
 
 The realistic-suite metric for this configuration is **~42 tok/s**
-(`tok_s_1_100_after_ttft`, per-run medians 42.03-42.55). Do not compare
+(`tok_s_1_100_after_ttft`, per-run medians 41.57-42.89 under the float16 default).
+Do not compare
 that against the 15.67 that appears in the investigation's working notes:
 15.67 was measured in the **eager, k=4** era, before graphs were enabled at all, and
 it is not comparable to anything in the README table. Likewise the "~1.6x from spec
@@ -226,6 +275,99 @@ same-era A/B, useless as context for the graphed config.
 Always state which metric you are quoting. `tok_s_1_100_after_ttft` (`suite.py`),
 `aggregate_tok_s` (`conc.py`), `median_tok_s_after_ttft` (`probe.py`), and the
 engine log's "Avg generation throughput" are four different measurements.
+
+## Prove the knob engaged before reporting "no effect"
+
+An A/B where the knob did nothing and an A/B where the knob did nothing *useful*
+produce the same table. Both read "no effect", and only one of them is true. The
+earliest version of this project reported three `XPU_*` environment knobs inert on
+throughput alone; the graph knob's inertness was later demonstrated properly (the
+engine log showed `cudagraph_mode=NONE` and no capture, so the flag had genuinely
+not applied), but the other two rested on "the number did not move". A flat result
+is only evidence about a knob you showed was live.
+
+So `scripts/bench/arm.sh` requires a positive engagement assertion — `NEEDLE` /
+`NEEDLE_ABSENT` — and aborts the arm rather than recording a row when the engine
+log and the dispatch census both fail to match. Two rules make that assertion
+worth anything:
+
+**Read the engine's own words, not your intent.** Attestation already does this
+for configuration (`../scripts/lib/attest.sh`), and the same discipline applies
+to code paths: grep the log for what the kernel printed, and census the dispatch
+branches actually taken.
+
+**Place an instrument at the point of no return.** This is the trap that nearly
+produced a published falsehood. A census note added at the *top* of the ESIMD GDN
+entry points logged every time the function was entered — before the block that
+checks `conv_state.dtype` and `ssm_state.dtype`. It printed confidently from an
+arm where the guard then rejected the call and the kernel never ran. Moving the
+same note immediately before the `op()` invocation inverted the result: the
+combination of `--dtype float16` and `--mamba-ssm-cache-dtype float16` prints it,
+and `--dtype float16` alone does not. A probe that fires on entry proves the
+function was *called*; only a probe beside the launch proves it *ran*.
+
+The corollary is that the census needs its own mount proof. The instrumented
+modules are bind-mounted over the image's copies, and a failed mount still
+produces valid `tok/s` — it just produces no census lines, which is exactly the
+evidence used to declare a path dead. `arm.sh` therefore asserts the live files
+contain the probe marker before it believes their silence.
+
+**Engagement proves a path ran. Only ablation proves it mattered.** Those are
+different claims and the second does not follow from the first. A shipped comment
+asserted that `--dtype float16` is faster *because* two ESIMD kernels are gated on
+`float16` and never run under bfloat16. Both halves checked out — the census showed
+the kernels firing under fp16 and silent under bf16, and the engine was faster under
+fp16 — and the conclusion was still wrong. The image exposes
+`VLLM_XPU_DISABLE_ESIMD_NORM` and `DISABLE_ESIMD_GDN_SPEC`, so each kernel could be
+switched off with the dtype pins still set, and the census proved each ablation
+applied. The win did not move. Disabling both at once did not move it either. The
+kernels were correlates.
+
+Two things made that mistake easy, and both are guardable:
+
+*The explanation was available before it was tested.* The source contains a literal
+`x.dtype == torch.float16` in the kernel's gate, so the causal sentence read like a
+description of the code rather than a claim about performance. A gate in the source
+establishes that a path is *reachable only* under fp16; it says nothing about how
+much of the time that path is responsible for.
+
+*Ablate jointly, not only singly.* Each kernel off alone changed nothing, which is
+weak evidence on its own: two redundant paths can each be individually unnecessary.
+The arm that settles it disables both. If a single ablation shows no effect and the
+paths might be redundant, the combined arm is not optional.
+
+The rule: when a knob's effect is explained by some path that newly appears, look
+for the switch that removes *just that path* and measure again. If the image exposes
+no such switch, write that the mechanism is unresolved instead of publishing the
+correlation as the reason.
+
+### A harness fixture must have the shape of the real artifact
+
+Engagement checks read files, so the harnesses feed them fixtures. If a fixture is
+an *easier* version of the real file, the harness goes green against code that cannot
+parse reality. That happened while separating stdout from stderr in `bench/arm.sh`:
+the pipeline that flattened probe output was replaced with a single-line brace match,
+and every arm would have been discarded as unparseable, because `probe.py` prints
+**indented** JSON and a one-line `{.*}` match returns the lone character `{`. The
+falsification suite stayed green throughout, because every fixture in it was written
+as one-line JSON.
+
+Three consequences worth carrying forward:
+
+* When a parser is added or changed, at least one fixture must be the real artifact's
+  actual shape -- indented, surrounded by log lines, whatever the producer truly
+  emits. `falsify/arm-cases.sh` now pins the parser against probe.py's multi-line
+  form directly, not just against compact fixtures.
+* A parser must fail *loudly*. An import error or empty result that exits nonzero with
+  no message is indistinguishable from "this measurement is degenerate", so a plumbing
+  fault rejects a healthy boot and nobody can see why.
+* In a mutation harness, an environment variable must be `export`ed on its own
+  statement. `VAR=value . file` does not export `VAR` -- bash treats an assignment
+  preceding the source builtin as a plain shell variable and rolls it back when the
+  source returns. A mutant that dies on a missing variable reports "still rejected",
+  which the harness then reads as "this rule is not load-bearing": a verdict about the
+  mutation caused entirely by the harness. The same failure mode as an unwired
+  assertion, but it looks like evidence rather than silence.
 
 ## The INT4 placeholder cells
 

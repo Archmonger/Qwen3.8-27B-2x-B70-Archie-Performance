@@ -31,11 +31,16 @@ image/Dockerfile               pinned base + Intel GPU userspace driver overlay
 scripts/serve.sh               in-container launcher (assembles the vllm serve line)
 scripts/verify.sh              config attestation + correctness + acceptance + surface
 scripts/soak.sh                sustained-load soak (oneCCL IPC-handle wedge)
-scripts/lib/                   profile-env parser + the attestation rules (shared)
+scripts/lib/                   profile-env parser + the attestation, engagement and
+                               degeneracy rules (shared with the harness)
 scripts/falsify/run-all.sh     proves every guard and attestation rule CAN fail
 scripts/download-models.sh     pinned `hf` fetch + drafter patch + weight sha256 check
 scripts/bench/                 named-test concurrency sweep, C1/natural probes,
                                prompt processing + TTFT, realistic suite, surface
+scripts/bench/arm.sh           one A/B arm: boot with overrides, attest, engage-assert,
+                               then gate and measure through the harnesses above
+scripts/instrument/            dispatch-census modules arm.sh mounts, so a knob can be
+                               shown to engage instead of assumed to have
 profiles/fp8/                  fp8.env + docker-compose.yml + model-patches/
 profiles/int4/                 PLACEHOLDER — READMEs only, no config
 data/                          realistic-suite-v1.json + the four test prompts
@@ -99,8 +104,12 @@ command block and explanation in
 
 Target `Qwen/Qwen3.8-27B-FP8`, drafter `rwmacy/qwen3.8-27b-dflash-drafter-fp8-b70`,
 image `vllm-llmscaler:icr26.35` (vLLM `0.26.1.dev0+g568afb3a1.d20260907`),
-TP=2, `MAX_NUM_SEQS=10`, 262144-token context, KV cache `fp8`, DSpark `k=7` static
-with `FULL_DECODE_ONLY` graphs at ceiling 80. Full configuration:
+TP=2, `MAX_NUM_SEQS=10`, 262144-token context, KV cache `fp8`, `--dtype float16`
+with `--mamba-ssm-cache-dtype float16`, DSpark `k=7` static
+with `FULL_DECODE_ONLY` graphs at ceiling 80. That dtype pair is the launcher's
+**default**, because it is the measured-best permutation, not vLLM's own default —
+`DTYPE=auto` reproduces the older bfloat16 baseline and is what an A/B control arm
+passes. Full configuration:
 [docs/configuration.md](docs/configuration.md). All numbers below are from the same
 configuration, so they are comparable with each other.
 
@@ -117,36 +126,20 @@ one that never stops inside its budget, so its figure is a cap.
 
 | Test Name | Concurrency | Tokens Generated | Value | Command |
 |---|---:|---:|---:|---|
-| Technical Planning | 10 | 2048 | **239.70** | `conc.py --test planning --cells 10:30` |
-| Technical Planning | 5 | 2048 | 161.27 | `conc.py --test planning --cells 5:20` |
-| Technical Planning | 1 | 2048 | 45.81 | `conc.py --test planning --cells 1:6` |
-| Counting | 10 | 512 | **675.59** | `conc.py --test counting --cells 10:30` |
-| Counting | 5 | 512 | 473.83 | `conc.py --test counting --cells 5:20` |
-| Counting | 1 | 512 | 136.28 | `conc.py --test counting --cells 1:6` |
-| Prose | 10 | 2048 | **210.50** | `conc.py --test prose --cells 10:30` |
-| Prose | 5 | 2048 | 135.16 | `conc.py --test prose --cells 5:20` |
-| Prose | 1 | 2048 | 38.26 | `conc.py --test prose --cells 1:6` |
-| Coding | 10 | 2048 | **325.96** | `conc.py --test coding --cells 10:30` |
-| Coding | 5 | 2048 | 224.31 | `conc.py --test coding --cells 5:20` |
-| Coding | 1 | 2048 | 61.37 | `conc.py --test coding --cells 1:6` |
-| Prompt Processing | 1 | — | **2 819** tok/s | `prefill.py --length-sweep` |
-| TTFT | 1 | — | **210.7** ms | `prefill.py --test …` (median over the four test prompts) |
-
-Concurrency is the number of requests in flight, capped by `MAX_NUM_SEQS`; the top cell
-of each test is the state a busy engine is actually in. `—` on the last two rows means
-the budget is not part of that metric: both are read from the first token of a stream,
-which does not depend on how many tokens are asked for afterwards.
-
-`--max-tokens` is part of the metric, not a knob: `aggregate_tok_s` moves ~15% between
-96 and 256 at `conc=10`, which is what once made a correct engine look ~13% depressed.
-What the spread actually is, how each number above was produced, why Prompt Processing
-has to be measured as a slope and not a ratio, which third-party numbers on this
-hardware are **not** parity targets, and which figures from the investigation were
-eager-era and are not comparable to anything above:
-[docs/measurement-notes.md](docs/measurement-notes.md). The checks that do not fit this
-table — acceptance length, correctness, serving surface, graph capture, soak, and the
-single-stream and realistic-suite probes — are in
-[docs/recorded-metrics.md](docs/recorded-metrics.md).
+| Technical Planning | 10 | 2048 | **297.95** | `conc.py --test planning --cells 10:30` |
+| Technical Planning | 5 | 2048 | 200.88 | `conc.py --test planning --cells 5:20` |
+| Technical Planning | 1 | 2048 | 51.11 | `conc.py --test planning --cells 1:6` |
+| Counting | 10 | 512 | **732.91** | `conc.py --test counting --cells 10:30` |
+| Counting | 5 | 512 | 519.63 | `conc.py --test counting --cells 5:20` |
+| Counting | 1 | 512 | 143.34 | `conc.py --test counting --cells 1:6` |
+| Prose | 10 | 2048 | **233.30** | `conc.py --test prose --cells 10:30` |
+| Prose | 5 | 2048 | 156.82 | `conc.py --test prose --cells 5:20` |
+| Prose | 1 | 2048 | 44.60 | `conc.py --test prose --cells 1:6` |
+| Coding | 10 | 2048 | **485.90** | `conc.py --test coding --cells 10:30` |
+| Coding | 5 | 2048 | 325.41 | `conc.py --test coding --cells 5:20` |
+| Coding | 1 | 2048 | 89.29 | `conc.py --test coding --cells 1:6` |
+| Prompt Processing | 1 | — | **3 207** tok/s | `prefill.py --length-sweep` |
+| TTFT | 1 | — | **188.1** ms | `prefill.py --test …` (median over the four test prompts) |
 
 ## Qwen3.8-27B-INT4 Recorded Performance Metrics
 

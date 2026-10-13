@@ -192,6 +192,142 @@ if [[ "${KV_OFFLOAD_SIZE:-50}" != "0" ]]; then
   KV_ARGS+=(--kv-offloading-size "$KV_OFFLOAD_SIZE")
 fi
 
+# --- activation / GDN-state dtype. W57 measured both knobs on this host against
+#     matched control boots. They are two different levers: DTYPE buys speed,
+#     MAMBA_SSM_CACHE_DTYPE buys KV capacity. Both default to float16 because
+#     this repo's rule is that the launcher default and the published numbers are
+#     the most optimized measured permutation, not the historical one. `auto`
+#     (what the launcher shipped with before this was measured) remains the
+#     documented control spelling: every A/B against the old baseline passes
+#     DTYPE=auto explicitly through scripts/bench/arm.sh.
+#
+# Measured (paired A/B on one rig via scripts/bench/arm.sh, shipped harnesses,
+# PROBES=instrument on both arms so neither pays probe overhead alone; two
+# controls and two candidates, order alternated, all gates PASS):
+#
+#   label               C1 probe   conc=1   conc=5  conc=10  GPU KV tokens
+#   DTYPE=auto             151.93    43.97   155.17   218.65        384,956
+#   DTYPE=auto             151.19    44.07   150.76   223.52        384,956
+#   DTYPE=float16          160.47    46.99   169.16   240.17        414,646
+#   DTYPE=float16          160.74    47.07   171.13   237.23        414,646
+#   control mean           151.56    44.02   152.96   221.09
+#   candidate mean         160.61    47.03   170.14   238.70
+#   delta                   +6.0%    +6.8%   +11.2%     +8.0%          +7.7%
+#
+# Within-arm spread is 0.27-0.74 on C1 and 2.0-4.9 on the conc cells, so every
+# delta above is several times the spread. Quote them with the ranges, not alone.
+#
+# The attribution split (earlier run, same rig, same harness, probes mounted on
+# every arm; one launch per label except where a rep is shown. Its KV totals
+# differ from the table above by a few hundred tokens, ordinary boot-to-boot
+# variation) is what justifies defaulting BOTH knobs:
+#
+#   label        knobs                    conc=10          conc=5   GPU KV tokens
+#   CALIB2/3     defaults                224.18/224.02    156.37/155.31      384,956
+#   MAMBA16      ssm=float16 only            225.79         156.49           397,616
+#   FP16ONLY     DTYPE=float16 only     244.76/241.53    161.86/168.96       389,265
+#   FP16FULL     both          237.66/245.08/242.86     166.04/171.45        415,029
+#
+# DTYPE is where the speed is: ssm alone is 225.79 against a 224.10 control mean,
+# while DTYPE alone is 243.15 and both together 241.87. The two fp16 rows sit
+# inside each other's spread, so the ssm pin buys nothing on throughput and is
+# defaulted in for capacity only. Its capacity is also NOT additive -- +12,660
+# tokens alone, +30,073 alongside DTYPE, against a 384,956 control -- because the
+# pool is whatever memory is left divided by a per-token page size that both
+# dtypes move. Do not quote a per-knob token delta as if the two summed.
+#
+# WHY IT IS FASTER IS NOT ESTABLISHED, and an earlier revision of this comment was
+# wrong about it. It asserted the win came from two XPU fast paths gated on
+# float16 that are dead under bfloat16. Both are real paths, and both were
+# confirmed absent under bf16 by a census probe -- but ablation refuted the causal
+# claim. Each was switched off in turn, and both off at once, with the dtype pins
+# still set and the census proving the ablation applied:
+#
+#   arm                                    ESIMD norm  GDN spec   conc10   C1
+#   DTYPE=float16 (candidate)                present      present  240.17   160.47
+#   DTYPE=float16 (candidate, rep 2)         present      present  237.23   160.74
+#   + VLLM_XPU_DISABLE_ESIMD_NORM=1             OFF       present  240.84   161.36
+#   + DISABLE_ESIMD_GDN_SPEC=1               present         OFF   243.41   160.45
+#   + both                                      OFF          OFF   239.99   160.05
+#
+# The win does not move when either kernel is off, or when both are. So neither
+# ESIMD kernel is the cause, and their appearance in the fp16 log is a
+# correlation. The fp8 GEMM dispatch is also identical in every arm -- 60
+# distinct (path,n,k,m) branches, all fp8_gemm_w8a16/oneDNN -- so the win is not
+# in GEMM kernel selection either.
+#
+# Two things the usual explanations would need, neither of which holds:
+#   * "fp16 halves memory traffic" cannot be it. The weights stay fp8 and lm_head
+#     stays bf16 in both arms, so the fp16 arm moves no fewer weight bytes per
+#     step, and decode here is bandwidth-bound on exactly those bytes. fp16 and
+#     bfloat16 are both two bytes anyway.
+#   * apply_block_scaled_mm (kernels/linear/scaled_mm/xpu.py) does
+#     `a16 = A if A.dtype is float16 else A.to(torch.float16).contiguous()`, so a
+#     bf16 arm pays one extra elementwise copy per block-fp8 GEMM call. Measured
+#     in the deployed image at 17 us per call at decode shapes (m=1 and m=8,
+#     k=5120; launch-dominated, so less once captured in a graph). Whether that
+#     explains the delta depends on how many such calls a step makes, which was NOT
+#     counted: the census reports 60 distinct (path,n,k,m) shapes, which is not a
+#     per-step call count, and inside FULL_DECODE_ONLY graphs the launch overhead
+#     that dominates the standalone measurement largely disappears. So this is a
+#     plausible contributor at an unquantified size, not an accounting.
+# So the win is measured and reproducible, and the "because" is OPEN. Do not repeat
+# "fp16 enables the ESIMD kernels, which is why it is faster": that sentence was in
+# this file, it sounded explanatory, and the ablations above falsified it. A change
+# that makes a faster-looking path appear in the log is not automatically caused by
+# that path.
+#
+# What MAMBA_SSM_CACHE_DTYPE does is established, and it is not redundant with
+# DTYPE. Two layers decide the recurrent-state dtype and the later one wins, so
+# reason about them in this order:
+#   1. cache_config._mamba_state_dtype lets the temporal state INHERIT conv_state
+#      when the setting is "auto". Read alone, that suggests DTYPE=float16 would
+#      bring the temporal state along for free.
+#   2. Qwen3_5ForConditionalGenerationConfig.verify_and_update_config
+#      (model_executor/models/config.py:752-777) then rewrites an "auto"
+#      mamba_ssm_cache_dtype to the checkpoint's mamba_ssm_dtype, which for this
+#      model is float32. It runs before the caches are built, so step 1 never sees
+#      "auto" and inheritance never applies.
+# Net effect: with both knobs at auto the recurrent state is float32 whatever
+# DTYPE says, and DTYPE=float16 alone leaves conv_state float16 / temporal float32
+# -- which is why the GDN core below rejects it. The engine says so directly: the
+# fp16 arm logs "Qwen3.5 model specifies mamba_ssm_dtype='float32' in its config,
+# but --mamba-ssm-cache-dtype='float16' was passed. Using the user-specified
+# value." Confirm any future claim here against THAT line in the engine log rather
+# than against step 1 in isolation; an earlier version of this comment quoted the
+# inheritance rule and a config probe of it, and described a state the engine never
+# reaches.
+#
+# Its own effect is KV capacity, 384,956 -> 414,646 tokens (+7.7%) alongside
+# DTYPE=float16, with throughput neutral on its own. It is also what lets the ESIMD
+# GDN core run at all -- that guard needs conv_state AND ssm_state float16 -- which
+# is worth knowing even though the core is not, per the ablations, what makes it
+# fast. Probe placement matters for any claim like this: the census note must sit
+# immediately before the op() call, not at function entry. An entry-site note
+# printed confidently from an arm where the guard then rejected the call.
+#
+# Note what is NOT a lever: the per-tensor ESIMD fp8 GEMV/GEMM path in
+# kernels/linear/scaled_mm/xpu.py belongs to XPUW8A16FP8LinearKernel, and this
+# checkpoint is block-fp8 (128x128), so it selects XPUFp8BlockScaledMMKernel and
+# can never reach that code.
+#
+# Quality did not regress under either arm, judged against the control on the same
+# harness: paired GSM8K 29/30 on both arms and control, 19/20 on a 20-item
+# exact-answer battery on both with the SAME single miss (an intrinsic model error,
+# not a dtype one), 0/20 non-reproducible greedy outputs, and correctness 15/15
+# with the acceptance fingerprint unchanged at C1 26 169 7.500.
+DTYPE="${DTYPE:-float16}"
+MAMBA_SSM_CACHE_DTYPE="${MAMBA_SSM_CACHE_DTYPE:-float16}"
+# --dtype is always passed; --mamba-ssm-cache-dtype is omitted entirely when auto.
+# With both defaults now float16 the default argv carries both flags -- the point
+# of the rule above is that the default IS the measured-best permutation, so do
+# not "restore the unchanged argv" by reverting these defaults; revert only if a
+# future measurement shows a different permutation wins.
+DTYPE_ARGS=(--dtype "$DTYPE")
+if [[ "$MAMBA_SSM_CACHE_DTYPE" != "auto" ]]; then
+  DTYPE_ARGS+=(--mamba-ssm-cache-dtype "$MAMBA_SSM_CACHE_DTYPE")
+fi
+
 # KV_CACHE_DTYPE=auto omits --kv-cache-dtype. fp8 is the only quantized KV dtype
 # that works on XPU: int4_per_token_head hits the 128 KiB local-data-shared-memory
 # wall in the attention kernel.
@@ -213,7 +349,8 @@ read -r -a PASS_ARGS <<<"${EXTRA_VLLM_ARGS:-}" || true
 serve() {
   vllm serve "$MODEL" \
     --host 0.0.0.0 --port "$PORT" --served-model-name "$SERVED_NAME" \
-    --tensor-parallel-size "$TP_SIZE" --dtype auto \
+    --tensor-parallel-size "$TP_SIZE" \
+    "${DTYPE_ARGS[@]}" \
     --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_NUM_SEQS" \
     --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS" --block-size 64 \
     --enable-prompt-tokens-details \

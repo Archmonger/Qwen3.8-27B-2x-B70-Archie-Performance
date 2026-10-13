@@ -36,6 +36,11 @@ PROF_ENV="$HERE/../profiles/$PROFILE/$PROFILE.env"
 _CLI_CTR="$CTR"; _CLI_PORT="$PORT"; _CLI_MNAME="$MNAME"
 . "$HERE/lib/profile-env.sh"; load_env_file "$PROF_ENV"
 . "$HERE/lib/attest.sh"
+# The dtype engagement rules live in engage.sh and are shared with the arm
+# harness, whose falsification harness proves they can fail. verify.sh reuses
+# that code rather than writing its own comparison, so "the profile pins float16
+# and the engine came up bf16" cannot pass here while failing there.
+. "$HERE/lib/engage.sh"
 CTR="${_CLI_CTR:-${CONTAINER_NAME:-}}"
 PORT="${_CLI_PORT:-${PORT:-8103}}"
 MNAME="${_CLI_MNAME:-${SERVED_NAME:-secondary}}"
@@ -97,6 +102,19 @@ done < "$WORK/verdicts"
 if [[ ! -s "$WORK/verdicts" ]]; then
   bad "attestation produced no verdicts at all (reading an empty log is not a pass)"
 fi
+
+# 2b. dtype engagement. The profile now ships the measured-best dtype pins, and a
+# profile whose pin silently failed to apply (compose interpolation dropped the
+# variable, an old serve.sh was mounted, an image reverted the flag) would
+# otherwise attest green: nothing else reads `dtype=torch.X` from the banner. rc 2
+# from assert_ssm_applied is "unprovable here" and is printed, never counted.
+dtype_msg=$(assert_dtype_applied "$LOG" "${DTYPE:-}"); dtype_rc=$?
+if   [[ $dtype_rc -eq 0 ]]; then good "dtype engagement ($dtype_msg)"
+else bad "dtype engagement -- $dtype_msg"; fi
+ssm_msg=$(assert_ssm_applied "$LOG" "${MAMBA_SSM_CACHE_DTYPE:-}"); ssm_rc=$?
+if   [[ $ssm_rc -eq 0 ]]; then good "ssm-cache engagement ($ssm_msg)"
+elif [[ $ssm_rc -eq 2 ]]; then good "ssm-cache dtype -- $ssm_msg"
+else bad "ssm-cache engagement -- $ssm_msg"; fi
 
 # --- 3. correctness ---------------------------------------------------------
 echo "[3/5] correctness"

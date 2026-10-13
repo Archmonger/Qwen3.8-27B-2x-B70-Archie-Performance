@@ -26,7 +26,8 @@ Quote the era with the throughput figures from that comparison (suite 15.67 vs
 13.56 tok/s): both were measured **eager, k=4, no graphs**, which is not the
 deployed shape. The acceptance ratio is the transferable finding; the absolute
 numbers describe the eager k=4 shape, not the one this repo ships. The graphed
-configuration's own suite metric is ~40-42 tok/s — see the README table.
+configuration's own suite metric is ~41-43 tok/s under the float16 default — see the
+README table.
 
 The pairing is legitimate across quantizations because the drafter's contract with
 the target is *only* those hidden-state taps: `target_layer_ids`,
