@@ -102,27 +102,8 @@ command block and explanation in
 
 ## Qwen3.8-27B-FP8 Recorded Performance Metrics
 
-Target `Qwen/Qwen3.8-27B-FP8`, drafter `rwmacy/qwen3.8-27b-dflash-drafter-fp8-b70`,
-image `vllm-llmscaler:icr26.35` (vLLM `0.26.1.dev0+g568afb3a1.d20260907`),
-TP=2, `MAX_NUM_SEQS=10`, 262144-token context, KV cache `fp8`, `--dtype float16`
-with `--mamba-ssm-cache-dtype float16`, DSpark `k=7` static
-with `FULL_DECODE_ONLY` graphs at ceiling 80. That dtype pair is the launcher's
-**default**, because it is the measured-best permutation, not vLLM's own default —
-`DTYPE=auto` reproduces the older bfloat16 baseline and is what an A/B control arm
-passes. Full configuration:
-[docs/configuration.md](docs/configuration.md). All numbers below are from the same
-configuration, so they are comparable with each other.
-
-Every cell is a measurement taken on this host with the configuration above, and each
-one is the **median of 3 reps** — a single number, deliberately, so two cells can be
-compared without deciding which of several recordings to believe. `aggregate_tok_s` is
-the metric for the token-generation rows.
-
-A **test name** pins the prompt *and* the `Max Tokens` budget together, from one table
-in `scripts/bench/conc.py`: the prompt and the budget are what the number measures, so
-they travel with the name and cannot be recombined. Each budget is the prompt's natural
-completion length, measured by running it to a stop rather than guessed; Coding is the
-one that never stops inside its budget, so its figure is a cap.
+> [!NOTE]
+> Target `Qwen/Qwen3.8-27B-FP8`, drafter `rwmacy/qwen3.8-27b-dflash-drafter-fp8-b70`, docker image `vllm-llmscaler:icr26.35` (vLLM `0.26.1.dev0+g568afb3a1.d20260907`), values are **median of 3 reps**.
 
 | Test Name | Concurrency | Tokens Generated | Value | Command |
 |---|---:|---:|---:|---|
