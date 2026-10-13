@@ -4,9 +4,11 @@
 summary grid — the four token-generation tests at three concurrencies, plus prompt
 processing and TTFT. This file holds the rest of what has been measured on this
 configuration: the supporting checks, the single-stream probes, and the engine-level
-attestations. Every value here was produced by a harness in this repo on this host, in
-the same session as the README's grid, against a container that `verify.sh` had just
-attested.
+attestations. Every value here was produced by a harness in this repo on this host,
+against a container that `verify.sh` had just attested. Each group was measured on its
+own attested boot rather than all sharing the grid's session, so treat cross-group
+comparisons as session-to-session (the host drifts ~5% per 10 boots) and same-group
+comparisons as rep-to-rep.
 
 How to read a number here: quote the **metric name** with it. `aggregate_tok_s`
 (`conc.py`), `median_tok_s_after_ttft` (`probe.py`), `tok_s_1_100_after_ttft`
@@ -60,9 +62,13 @@ no queue, counted from SSE token events rather than from server-reported usage.
 | Short prompt (C1) | `"1 2"` (15 tok reported) | 16 | **161.27** (reps 161.27 / 160.73 / 161.55; best single-rep peak 162.44) | `probe.py --prompt "1 2" --max-tokens 16 --iters 10 --warmup 3 --label C1` |
 | Natural (planning prompt) | `prompt-planning.txt` | 96 | **58.83** (reps 58.83 / 58.62 / 58.89; best single-rep peak 59.09) | `probe.py --prompt "$(cat data/prompt-planning.txt)" --max-tokens 96 --iters 6 --warmup 2 --label NAT` |
 
-Each row is the median of three `probe.py` runs taken in the same session as the
-README's grid, on the attested boot. The per-rep values are printed rather than a bare
-range so the spread is inspectable: C1 varies ~0.5% rep to rep, natural ~0.5%. Both
+Each row is the median of three `probe.py` runs on an attested boot (`setup.sh --profile
+fp8`, which runs `verify.sh`: engine attestation, correctness 15/15, acceptance, serving
+surface). That boot is a separate session from the README's grid, so these are not
+comparable to the grid cells to within a session — the host drifts ~5% per 10 boots, and
+this repo publishes grid and probe numbers from their own attested boots rather than
+pretending one boot produced all of them. The per-rep values are printed rather than a
+bare range so the spread is inspectable: C1 varies ~0.5% rep to rep, natural ~0.5%. Both
 hold the boot fixed, so they measure rep noise only — not a session-to-session floor.
 See the spread section of [measurement-notes.md](measurement-notes.md).
 
