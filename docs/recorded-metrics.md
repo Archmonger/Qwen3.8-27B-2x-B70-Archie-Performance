@@ -59,8 +59,8 @@ no queue, counted from SSE token events rather than from server-reported usage.
 
 | test name | prompt | budget | `median_tok_s_after_ttft` | how |
 |---|---|---|---|---|
-| Short prompt (C1) | `"1 2"` (15 tok reported) | 16 | **161.27** (reps 161.27 / 160.73 / 161.55; best single-rep peak 162.44) | `probe.py --prompt "1 2" --max-tokens 16 --iters 10 --warmup 3 --label C1` |
-| Natural (planning prompt) | `prompt-planning.txt` | 96 | **58.83** (reps 58.83 / 58.62 / 58.89; best single-rep peak 59.09) | `probe.py --prompt "$(cat data/prompt-planning.txt)" --max-tokens 96 --iters 6 --warmup 2 --label NAT` |
+| Short prompt (C1) | `"1 2"` (15 tok reported) | 16 | **161.39** (reps 161.39 / 161.46 / 155.38; best single-rep peak 163.13) | `probe.py --prompt "1 2" --max-tokens 16 --iters 10 --warmup 3 --label C1` |
+| Natural (planning prompt) | `prompt-planning.txt` | 96 | **58.64** (reps 58.64 / 59.08 / 56.95; best single-rep peak 59.15) | `probe.py --prompt "$(cat data/prompt-planning.txt)" --max-tokens 96 --iters 6 --warmup 2 --label NAT` |
 
 Each row is the median of three `probe.py` runs on an attested boot (`setup.sh --profile
 fp8`, which runs `verify.sh`: engine attestation, correctness 15/15, acceptance, serving
@@ -69,7 +69,14 @@ comparable to the grid cells to within a session — the host drifts ~5% per 10 
 this repo publishes grid and probe numbers from their own attested boots rather than
 pretending one boot produced all of them. The per-rep values are printed rather than a
 bare range so the spread is inspectable: C1 varies ~0.5% rep to rep, natural ~0.5%. Both
-hold the boot fixed, so they measure rep noise only — not a session-to-session floor.
+hold the boot fixed, so they measure rep noise only — not a session-to-session floor —
+but this session's rep noise was larger than the ~0.5% these probes had shown before:
+C1 spans 3.9% and natural 3.7% rep to rep, and the *same* rep (the third) is the low one
+in both. Two metrics dropping together in the same rep points at the box or the engine
+state at that moment rather than at either harness, which is why the median is the
+published value and not the mean. Note the third rep also ran immediately after a
+`suite.py` pass in this driver, so a shared after-effect in the engine is the other
+candidate; neither was isolated. Quote the per-rep values, not just the median.
 See the spread section of [measurement-notes.md](measurement-notes.md).
 
 The C1 row's prompt is the same 15-token baseline `prefill.py` pairs against, which is
@@ -87,11 +94,11 @@ figure has only ever been measured at 96.
 
 | metric | recorded | how |
 |---|---|---|
-| `tok_s_1_100_after_ttft` | **41.67** (runs 42.98 / 41.67 / 41.45, each n=12) | `suite.py`, 12 cold prompts from `data/realistic-suite-v1.json`, each sent once |
-| Suite TTFT | **138.2** ms (runs 138.2 / 146.8 / 116.9) | same run |
+| `tok_s_1_100_after_ttft` | **42.22** (runs 42.89 / 42.22 / 41.57, each n=12) | `suite.py`, 12 cold prompts from `data/realistic-suite-v1.json`, each sent once |
+| Suite TTFT | **141.3** ms (runs 141.3 / 153.0 / 128.8) | same run |
 
-The suite's per-run median is stable (41.45-42.98, a 3.7% spread) while its TTFT is not
-(116.9-146.8 ms). That is not a defect in the number, it is what the two metrics are
+The suite's per-run median is stable (41.57-42.89, a 3.2% spread) while its TTFT is not
+(128.8-153.0 ms). That is not a defect in the number, it is what the two metrics are
 made of: each run sends 12 *distinct* prompts once, so the throughput is averaged over
 12 samples of the same 12 prompts, whereas TTFT is dominated by whether a request
 happens to arrive in the fast or slow mode of the session (see the drift discussion in

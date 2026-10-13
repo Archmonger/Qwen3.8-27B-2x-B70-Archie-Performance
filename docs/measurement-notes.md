@@ -263,7 +263,7 @@ same era.
 ## Quote the era and the metric name with every number
 
 The realistic-suite metric for this configuration is **~42 tok/s**
-(`tok_s_1_100_after_ttft`, per-run medians 41.45-42.98 under the float16 default).
+(`tok_s_1_100_after_ttft`, per-run medians 41.57-42.89 under the float16 default).
 Do not compare
 that against the 15.67 that appears in the investigation's working notes:
 15.67 was measured in the **eager, k=4** era, before graphs were enabled at all, and
