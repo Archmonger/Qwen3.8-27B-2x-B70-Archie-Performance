@@ -19,18 +19,31 @@ covers why, and what each protocol is worth.
 | test name | metric | recorded | how |
 |---|---|---|---|
 | Acceptance length (C1) | mean accepted tokens per draft step | **7.500** (26 drafts / 169 accepted) | `acceptance.sh` |
-| Acceptance length (natural) | mean accepted tokens per draft step | **3.000** (256 / 512) | `acceptance.sh` |
+| Acceptance length (natural) | mean accepted tokens per draft step | **2.882** (272 / 512) on the float16 default; **3.000** (256 / 512) on a `DTYPE=auto` arm | `acceptance.sh` |
 | Correctness | correct answers / attempted | **15/15** this session; **30/30** per graphs-on arm of the establishing A/B | `correctness.sh` |
 | Serving surface | checks passed | **5/5** | `surface.py` |
-| Graph capture cost | GiB/rank, seconds | **0.58-0.60** GiB/rank, **7** s | engine log |
+| Graph capture cost | GiB/rank, seconds | **0.58-0.60** GiB/rank, **7-8** s | engine log |
 | Configured capture ladder | captured batch sizes | `[1,2,4,8,16,24,32,40,48,56,64,72,80]` (13 sizes to 80) | engine log (`cudagraph_capture_sizes`) |
-| Soak | cycles, duration, load rounds, wedges, restarts | **6/6** cycles, **600** s each (**3600** s), **46** completed load rounds, **0** wedges, **0** restarts | `soak.sh --profile fp8` |
+| Soak | cycles, duration, load rounds, wedges, restarts | **6/6** cycles, **600** s each (**3600** s), **48** completed load rounds, **0** wedges, **0** restarts | `soak.sh --profile fp8` |
 
 The acceptance pair is the strongest single signal that a build is the build it claims
-to be: landing on the *same* draft and accepted counts (`C1 26 169 7.500`,
-`NAT 256 512 3.000`) is a fingerprint of drafter, target, and `k` taken together, and
-it held across every recording. At `k=7` the ceiling is 8.000; a zero-draft reading
-means spec decode disabled itself, which is what `acceptance.sh` exists to catch.
+to be: landing on the *same* draft and accepted counts is a fingerprint of drafter,
+target, and `k` taken together. Read it per dtype, though — the natural half is **not**
+dtype-invariant. Across every recorded arm, `C1 26 169 7.500` is identical on both
+permutations while the natural window splits cleanly by engine dtype:
+
+| engine dtype | NAT window |
+|---|---|
+| `bfloat16` (`DTYPE=auto`) | `256 512 3.000` |
+| `float16` (the shipped default) | `272 512 2.882` |
+
+That is 16 more draft steps for the same 512 accepted tokens. The 2.882 value is
+deterministic: it reproduced identically on every float16 arm recorded, including all
+four ESIMD-ablation arms, so it is the float16 fingerprint and not noise. What the
+fingerprint still proves is unchanged — a *shift* away from your dtype's own expected
+value means the drafter, target, or `k` is not what you think, and a zero-draft reading
+means spec decode disabled itself, which is what `acceptance.sh` exists to catch. At
+`k=7` the ceiling is 8.000.
 
 The correctness row is not decoration. The graph-stride defect in
 [cudagraph-stride-defect.md](cudagraph-stride-defect.md) runs at full throughput with
@@ -44,12 +57,12 @@ no queue, counted from SSE token events rather than from server-reported usage.
 
 | test name | prompt | budget | `median_tok_s_after_ttft` | how |
 |---|---|---|---|---|
-| Short prompt (C1) | `"1 2"` (15 tok reported) | 16 | **151.68** (reps 150.26 / 151.81 / 151.68, peak 152.83) | `probe.py --prompt "1 2" --max-tokens 16 --iters 10 --warmup 3 --label C1` |
-| Natural (planning prompt) | `prompt-planning.txt` | 96 | **58.98** (reps 58.98 / 59.00 / 58.63, peak 59.18) | `probe.py --prompt "$(cat data/prompt-planning.txt)" --max-tokens 96 --iters 6 --warmup 2 --label NAT` |
+| Short prompt (C1) | `"1 2"` (15 tok reported) | 16 | **161.27** (reps 161.27 / 160.73 / 161.55; best single-rep peak 162.44) | `probe.py --prompt "1 2" --max-tokens 16 --iters 10 --warmup 3 --label C1` |
+| Natural (planning prompt) | `prompt-planning.txt` | 96 | **58.83** (reps 58.83 / 58.62 / 58.89; best single-rep peak 59.09) | `probe.py --prompt "$(cat data/prompt-planning.txt)" --max-tokens 96 --iters 6 --warmup 2 --label NAT` |
 
 Each row is the median of three `probe.py` runs taken in the same session as the
 README's grid, on the attested boot. The per-rep values are printed rather than a bare
-range so the spread is inspectable: C1 varies ~1.0% rep to rep, natural ~0.6%. Both
+range so the spread is inspectable: C1 varies ~0.5% rep to rep, natural ~0.5%. Both
 hold the boot fixed, so they measure rep noise only — not a session-to-session floor.
 See the spread section of [measurement-notes.md](measurement-notes.md).
 
@@ -68,11 +81,11 @@ figure has only ever been measured at 96.
 
 | metric | recorded | how |
 |---|---|---|
-| `tok_s_1_100_after_ttft` | **42.11** (runs 42.11 / 42.55 / 42.03, each n=12) | `suite.py`, 12 cold prompts from `data/realistic-suite-v1.json`, each sent once |
-| Suite TTFT | **165.6** ms (runs 165.6 / 140.6 / 179.6) | same run |
+| `tok_s_1_100_after_ttft` | **41.67** (runs 42.98 / 41.67 / 41.45, each n=12) | `suite.py`, 12 cold prompts from `data/realistic-suite-v1.json`, each sent once |
+| Suite TTFT | **138.2** ms (runs 138.2 / 146.8 / 116.9) | same run |
 
-The suite's per-run median is stable (42.03-42.55, a 1.2% spread) while its TTFT is not
-(140.6-179.6 ms). That is not a defect in the number, it is what the two metrics are
+The suite's per-run median is stable (41.45-42.98, a 3.7% spread) while its TTFT is not
+(116.9-146.8 ms). That is not a defect in the number, it is what the two metrics are
 made of: each run sends 12 *distinct* prompts once, so the throughput is averaged over
 12 samples of the same 12 prompts, whereas TTFT is dominated by whether a request
 happens to arrive in the fast or slow mode of the session (see the drift discussion in

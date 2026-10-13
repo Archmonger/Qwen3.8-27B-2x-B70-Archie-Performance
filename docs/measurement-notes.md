@@ -176,6 +176,54 @@ the GPU perf/OA unit open was blamed for the depression, then cleared — it sta
 Oct 3, so it was also running during the Oct 7 run that recorded 227.13 and cannot
 explain a delta between the two. The real cause was in the harness all along.
 
+## The 2026-10-12 re-measurement: two tests moved as expected, two did not
+
+The grid was re-swept on the shipped `float16` default, 3 reps per cell, one attested
+boot (`VERIFY: PASS`, `dtype=torch.float16`, `ssm engagement ok (float16)`, correctness
+15/15). Compared against the table it replaced, the four tests did not move together:
+
+| test | previous | now | change | dtype alone predicts |
+|---|---:|---:|---:|---:|
+| Counting (512) | 675.59 | 732.91 | **+8.5%** | +8% — matches |
+| Prose (2048) | 210.50 | 233.30 | **+10.8%** | +8% — close |
+| Technical Planning (2048) | 239.70 | 297.95 | **+24.3%** | +8% — 3x too small |
+| Coding (2048) | 325.96 | 485.90 | **+49.0%** | +8% — 6x too small |
+
+One change to the engine cannot move two tests by 8% and two by 24–49%, so the two large
+cells were not comparable to the two small ones. `--max-tokens` is the known cause of
+exactly this shape (section above), and it fits the two big cells:
+
+* Sweeping `coding` at **256** on the shipped float16 default gives **346.02** conc10,
+  against the previous published **325.96**.
+* Sweeping `coding` at 256 on a **bfloat16** control arm (`DTYPE=auto`, banner confirmed
+  `dtype=torch.bfloat16`, KV back to 384,956 tokens) gives **331.72** — **1.7%** off the
+  published figure. That is the previous cell, reproduced.
+* Sweeping `planning` at 256 on the same control gives **227.94**, **5.2%** off its
+  published 239.70.
+* Sweeping `prose` at 256 on the same control gives **174.57** — **20.6% below** its
+  published 210.50. Sweeping `counting` at 256 gives **590.49**, **14.4% below** its
+  published 675.59.
+
+So the previous table was **not one protocol**: `coding` and `planning` read like a sweep
+at the old `--max-tokens 256` default that got published with the canonical budget in the
+column, while `prose` and `counting` were genuinely swept at their canonical budgets and
+rose by about the dtype delta. The 2048-token tests were the ones exposed to the budget
+bug, which is also the direction the mechanism predicts.
+
+**What is not established.** The previous table's provenance could not be recovered: a
+recursive search of `/root` for the four published conc10 values hits only unrelated
+binary caches, so no surviving session log records what was swept. The account above is
+therefore inference from reproduction, not a record of what was run. Two cells reproduce
+a 256 sweep within 5%; the other two reproduce neither a 256 sweep nor a canonical sweep,
+and their previous values sit between the two. Session drift is a plausible contributor —
+this host drifts ~5% per 10 boots and those cells had no calibration arm — but 14–20% is
+more than that explains. Do not reconstruct those cells from this section; the values now
+published are the ones with a surviving log and an attested boot.
+
+The rule this enforces, restated because it was broken by the tooling rather than by
+carelessness: **a published cell has to name every parameter that moves it, and a table
+whose rows came from different sweeps is not comparable even when every row is correct.**
+
 ## The two measurements that changed the number
 
 1. **`MAX_NUM_SEQS x (1+k)` is the graph ceiling, and 72 was wrong.** A decode step
@@ -215,7 +263,8 @@ same era.
 ## Quote the era and the metric name with every number
 
 The realistic-suite metric for this configuration is **~42 tok/s**
-(`tok_s_1_100_after_ttft`, per-run medians 42.03-42.55). Do not compare
+(`tok_s_1_100_after_ttft`, per-run medians 41.45-42.98 under the float16 default).
+Do not compare
 that against the 15.67 that appears in the investigation's working notes:
 15.67 was measured in the **eager, k=4** era, before graphs were enabled at all, and
 it is not comparable to anything in the README table. Likewise the "~1.6x from spec
