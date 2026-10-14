@@ -47,7 +47,7 @@ a6db322ccfb567e54fefb2fccb1ce7e6410384d91a78216eb58f592c798ea3b1  layernorm.py
 |---|---|---|
 | `layernorm.py` | 0 | adds a census note beside the ESIMD fused add-RMS-norm `op()` call |
 | `flash_attn.py` | 0 | adds a note beside the ESIMD paged-attention launch |
-| `_xpu_esimd.py` | 0 | adds notes beside the GDN decode and GDN **speculative** `op()` calls |
+| `_xpu_esimd.py` | 0 | adds notes beside the GDN decode, GDN **speculative**, and GDN fp16 **`in_proj_ba`** `op()` calls |
 | `xpu.py` | **3** | census notes **plus** behaviour-relevant edits, see below |
 
 Only `norm_esimd` and `gdn_spec_esimd` have ever actually printed in an arm. The
