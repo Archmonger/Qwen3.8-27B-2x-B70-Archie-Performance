@@ -376,7 +376,7 @@ def try_esimd_gdn_fp16_ba_projection(
             rows, weight.shape[0], dtype=torch.float16, device=hidden_states.device
         )
         buffers[rows] = output
-    # At the launch site, not at function entry: this helper has six return-None
+    # At the launch site, not at function entry: this helper has seven return-None
     # gates between entry and here, so an entry-site note would print from arms
     # where the kernel never ran.
     _xpu_w57_note(
