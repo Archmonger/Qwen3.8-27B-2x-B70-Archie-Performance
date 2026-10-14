@@ -47,11 +47,24 @@ a6db322ccfb567e54fefb2fccb1ce7e6410384d91a78216eb58f592c798ea3b1  layernorm.py
 |---|---|---|
 | `layernorm.py` | 0 | adds a census note beside the ESIMD fused add-RMS-norm `op()` call |
 | `flash_attn.py` | 0 | adds a note beside the ESIMD paged-attention launch |
-| `_xpu_esimd.py` | 0 | adds notes beside the GDN decode and GDN **speculative** `op()` calls |
+| `_xpu_esimd.py` | 0 | adds notes beside the GDN decode, GDN **speculative**, and GDN fp16 **`in_proj_ba`** `op()` calls |
 | `xpu.py` | **3** | census notes **plus** behaviour-relevant edits, see below |
 
-Only `norm_esimd` and `gdn_spec_esimd` have ever actually printed in an arm. The
-paged-attention probe in `flash_attn.py` has never fired on this model, and the
+`norm_esimd`, `gdn_spec_esimd` and `gdn_ba_esimd` have all printed in a real arm.
+The last one fired at `rows=3,5,8` across seven boots of Qwen3.8-27B-FP8 TP2 and
+printed nothing once `VLLM_XPU_DISABLE_ESIMD_GDN_PROJ=1` was set, which is what
+makes a "the flag does nothing" verdict about that helper trustworthy rather than
+merely consistent with the data. Its `rows` gate is `2 <= rows <= 8`, so at
+conc=10 it only runs on the steps where a single request is decoding; the other
+three helpers the same flag gates are `M == 1` only (`try_esimd_gdn_input_projections`,
+`try_esimd_gdn_output_projection`) or `2 <= M <= 128`
+(`try_esimd_gdn_output_norm_batched`), and only the last of those has a `rows`
+gate that admits the conc=10 decode width. Whether it actually launches there is a
+separate question that this census does not answer -- it has no probe, so treat it
+as unmeasured, not as live. A census line for one helper is therefore not evidence
+about the others; do not use one probe to close the flag.
+
+The paged-attention probe in `flash_attn.py` has never fired on this model, and the
 reason is checkable rather than mysterious: its gate accepts only
 `gqa_ratio == 2` or `gqa_ratio >= 4 and gqa_ratio % 4 == 0`, while this checkpoint
 is 24 query heads over 4 KV heads, i.e. `gqa_ratio = 6`, which satisfies neither
