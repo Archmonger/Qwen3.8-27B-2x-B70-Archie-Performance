@@ -20,7 +20,12 @@ The drafter was fine-tuned on **FP8** hidden states, and it shows: pos-0 accepta
 55-84% on the FP8 target vs 45-61% on an INT4 target. FP8 is the smartest of the
 quant matrix on this box and the right partner for this drafter; it also costs KV
 headroom (KV 9.97 GiB, max concurrency for the full 262k context 1.46x — INT4 gets
-15.37 GiB / 2.25x).
+15.37 GiB / 2.25x). Quote that KV pair with its era: both sides were measured under
+`DTYPE=auto`, before `--dtype float16` + `--mamba-ssm-cache-dtype float16` became the
+default. On the shipped permutation the FP8 side reads 10.59 GiB / 1.58x
+(415,029 tokens); the INT4 side has not been re-measured under it. See
+[configuration.md](configuration.md) for the dtype-dependent pool and why the two
+dtype knobs' capacity deltas do not add.
 
 Quote the era with the throughput figures from that comparison (suite 15.67 vs
 13.56 tok/s): both were measured **eager, k=4, no graphs**, which is not the
