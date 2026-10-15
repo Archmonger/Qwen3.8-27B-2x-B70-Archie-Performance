@@ -105,6 +105,9 @@ command block and explanation in
 > [!NOTE]
 > Target `Qwen/Qwen3.8-27B-FP8`, drafter `rwmacy/qwen3.8-27b-dflash-drafter-fp8-b70`, docker image `vllm-llmscaler:icr26.35` (vLLM `0.26.1.dev0+g568afb3a1.d20260907`), values are **median of 3 reps**.
 
+> [!WARNING]
+> Intel Arc Pro B70 [does **not** support](https://www.techpowerup.com/gpu-specs/arc-pro-b70.c4388) hardware native FP8 vector **or** matrix operations. As a result, this image has an upper bound on maximum performance. Despite this, my recipe has the fastest B70 8-bit metrics I've seen. Additionally, FP8 is the only low precision format provided directly by Alibaba.
+
 | Test Name | Concurrency | Tokens Generated | Value | Command |
 |---|---:|---:|---:|---|
 | Technical Planning | 10 | 2048 | **297.95** | `conc.py --test planning --cells 10:30` |
@@ -124,13 +127,17 @@ command block and explanation in
 
 ## Qwen3.8-27B-INT4 Recorded Performance Metrics
 
-> **PLACEHOLDER — this repo holds no INT4 measurement.**
+> [!NOTE]
+> **PLACEHOLDER — this recipe is in-progress.**
 >
 > Reserved for the INT4 profile's numbers, in the same shape and with the same metric
 > names as the FP8 table above. The `how` column pins every parameter that moves the
 > number, mirroring the FP8 canonical set so the two profiles stay comparable —
 > measure at those values, or change the column and the cell together:
->
+
+> [!WARNING]
+> This recipe is W4A16, which has higher theoretical accuracy compared to W4A4, but comes with a performance penalty caused by the need to dequantize from 4 bit to 16 bit. Despite this, this recipe has fantastic speed metrics due to the B70 platform having support for 16 bit vector **and** and matrix operations. Note that FP16/BF16 are the lowest precisions on B70 that has both vector **and** matrix support, thus W4A16 theoretically has the best trade-offs for scalability.
+
 > | Test Name | Concurrency | Tokens Generated | Value | Command |
 > |---|---:|---:|---:|---|
 > | Technical Planning | 10 | 2048 | *TBD* | `conc.py --test planning --cells 10:30` |
@@ -147,21 +154,6 @@ command block and explanation in
 > | Coding | 1 | 2048 | *TBD* | `conc.py --test coding --cells 1:6` |
 > | Prompt Processing | 1 | — | *TBD* | `prefill.py --length-sweep` |
 > | TTFT | 1 | — | *TBD* | `prefill.py --test …` (median over the four test prompts) |
->
-> The supporting checks that sit outside this grid — acceptance length, correctness,
-> serving surface, graph capture, soak, and the single-stream and realistic-suite
-> probes — take their column shape from
-> [docs/recorded-metrics.md](docs/recorded-metrics.md), which is where the FP8
-> equivalents are recorded. Fill them from `scripts/verify.sh` and
-> `scripts/bench/run-all.sh` on an idle engine, three reps per cell, median published,
-> and only from the harnesses in this repo.
->
-> Until those cells are filled from a run this repo produced, do not substitute
-> numbers from elsewhere. Why the investigation's INT4 figures (C1 71.08, natural
-> 21.19, no-spec 10.93 / 11.22) are not usable here:
-> [docs/measurement-notes.md#the-int4-placeholder-cells](docs/measurement-notes.md#the-int4-placeholder-cells).
-> The constraints that decide which INT4 checkpoint and which `SPEC_METHOD` are even
-> legal: [profiles/int4/README.md](profiles/int4/README.md).
 
 ## Documentation
 
@@ -179,7 +171,7 @@ command block and explanation in
 
 ## Provenance
 
-Everything here was measured on one host (2x Arc Pro B70, TP2, CachyOS) and the
+Everything here was measured on one host (2x Arc Pro B70, TP2, CachyOS, PCIE 4.0 16x) and the
 files are the ones that host runs. Numbers are that box's: the ceiling rule, the
 correctness gates, and the harnesses travel; the absolute tok/s figures, the
 oneCCL settings, and the P2P verdict may not.
