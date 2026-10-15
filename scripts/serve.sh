@@ -124,7 +124,12 @@ TP_SIZE="${TP_SIZE:-2}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-10}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.92}"
-KV_OFFLOAD_SIZE="${KV_OFFLOAD_SIZE:-50}"
+# Off by default. The host KV tier is not a performance knob on this deployment:
+# it never serves a read (kv_offload_cpu_cache_read_usage_perc stays 0.0 and the
+# external prefix-cache hit rate stays 0.0% across every boot measured) while
+# reserving a host store of this size, and at long context the connector takes the
+# whole engine down. See docs/kv-offload-defect.md before turning it back on.
+KV_OFFLOAD_SIZE="${KV_OFFLOAD_SIZE:-0}"
 
 # --- Speculative decoding.
 #
@@ -188,7 +193,10 @@ fi
 # KV_OFFLOAD_SIZE=0 omits --kv-offloading-size entirely; handing vLLM a literal
 # 0 is not the same as omitting the flag.
 KV_ARGS=()
-if [[ "${KV_OFFLOAD_SIZE:-50}" != "0" ]]; then
+# Test the resolved value from the assignment above, not a fresh ${VAR:-50}: the
+# two could disagree, and an empty value then passed the guard (empty -> 50) while
+# passing "$VAR" handed the parser a flag with no argument.
+if [[ "$KV_OFFLOAD_SIZE" != "0" ]]; then
   KV_ARGS+=(--kv-offloading-size "$KV_OFFLOAD_SIZE")
 fi
 

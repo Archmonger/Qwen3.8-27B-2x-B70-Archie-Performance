@@ -90,7 +90,7 @@ offload; without it, weight conversion exhausts device memory during load.
 | item | value | why |
 |---|---|---|
 | KV cache | `--kv-cache-dtype fp8` | the measured config, and **required** for the full 262k context (a measured fp16-KV boot caps out at 212,480). FP8 KV is the difference between 1.46x and (on INT4) 2.25x concurrency headroom at 262k — that pair is like-for-like, both under `DTYPE=auto`; the shipped `float16` default moves the FP8 side to 1.58x |
-| KV offload | `--kv-offloading-size 50` (GB) | host-memory tier. `0` **omits** the flag — passing a literal 0 is not the same thing |
+| KV offload | **off** (`KV_OFFLOAD_SIZE=0`, flag omitted) | the host tier is not a performance knob here and it is a crash vector at long context. It never serves a read — `kv_offload_cpu_cache_read_usage_perc` and the external prefix-cache hit rate both stay `0.0` across every boot measured — while consuming host RAM proportional to use and, under `--kv-offloading-size 50`, driving `MemAvailable` from ~80-88 GiB to ~8.8 GiB on a 188 GiB box. A single ~160k-token request then took the whole engine down. `0` **omits** the flag — passing a literal 0 is not the same thing. Read [kv-offload-defect.md](kv-offload-defect.md) before re-enabling |
 | GDN recurrent state | `--mamba-ssm-cache-dtype float16` | this is a hybrid GDN/linear-attention arch (`Qwen3_5ForConditionalGeneration`, `linear_attention` on 3 of every 4 layers), so the recurrent state is a **second, separate** cache dtype and `auto` does not mean "inherit `--dtype`" — see `MAMBA_SSM_CACHE_DTYPE` below. Throughput-neutral on its own; it buys KV capacity and is what lets the ESIMD GDN core run alongside `--dtype float16` |
 | engine dtype | `--dtype float16` | **the measured-best value and the shipped default.** `--dtype auto` resolves to bfloat16 for this FP8 checkpoint and measures **-6.0%** C1 / **-8.0%** conc=10 against it; see `DTYPE` below. This row used to say the opposite — "**do not force `--dtype float16`** — it downcasts the LM head and degrades output on this arch" — and was wrong on both halves. The LM head stays bf16 under *either* setting (`scripts/serve.sh`: "weights stay fp8 and lm_head stays bf16 in both arms"), so `--dtype` downcasts nothing here; and "degrades output" did not reproduce either — the quality battery matched the control (`serve.sh`: paired GSM8K 29/30 on both arms *and* control, 19/20 exact-answer with the **same** single miss, 0/20 non-reproducible greedy outputs, correctness 15/15), and the load-bearing acceptance counts are unmoved (C1 `26 169 7.500`; 512 accepted in both windows on either dtype). The soft NAT draft count reads 272 rather than 256 — read [recorded-metrics.md](recorded-metrics.md) and the header of `scripts/bench/acceptance.sh` before treating that as a result. The row predates the W57 paired A/B that settled it |
 
@@ -134,7 +134,6 @@ vllm serve /models/target \
   --block-size 64 \
   --enable-prompt-tokens-details --enable-auto-tool-choice \
   --tool-call-parser qwen3_xml --reasoning-parser qwen3 \
-  --kv-offloading-size 50 \
   --default-chat-template-kwargs '{"enable_thinking": true, "preserve_thinking": true, "reasoning_effort": "xhigh"}' \
   --kv-cache-dtype fp8 \
   --gpu-memory-utilization 0.92 --trust-remote-code --enable-prefix-caching \
@@ -223,6 +222,7 @@ the host toolkit also removes `level-zero-loader` and kills GPU init.)
 | `MAX_MODEL_LEN` | `262144` | `[HW]` lowering it frees KV headroom |
 | `MAX_NUM_SEQS` | `10` | `[HW]` drives the graph ceiling. A saturated engine always sits at this cap, so benchmark **here**, not at conc=8 |
 | `GPU_MEM_UTIL` | `0.92` | `[HW]` lower it if anything else shares the GPUs |
+| `KV_OFFLOAD_SIZE` | `0` (off) | host KV tier in GB. `[HW]` **off by default and stays off**: the tier never serves a read here, and at `50` it consumed ~80 GiB of host `MemAvailable` and killed the engine on a single long request. `0` omits `--kv-offloading-size` entirely — a literal `0` is a different config from an absent flag. See [kv-offload-defect.md](kv-offload-defect.md) |
 | `SPEC` / `SPEC_METHOD` | `1` / `dspark` | |
 | `SPEC_TOKENS_SCHEDULE` | **unset** | `[never with graphs]` it garbles output (6-13/30 correct) with healthy-looking acceptance counters. `setup.sh` aborts if it is set |
 | `WARMUP` | `1` | burns 64 decode steps through a throwaway completion after `/health`, because in eager mode Triton JITs during the first inferences and those first requests otherwise time out empty |

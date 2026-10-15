@@ -164,6 +164,7 @@ command block and explanation in
 | [docs/measurement-notes.md](docs/measurement-notes.md) | how to read the metrics table: where each recording comes from, why the prefill rate is a slope, the `max_tokens` mismatch, spread, eras, and the third-party numbers that are not parity targets |
 | [docs/verification.md](docs/verification.md) | what each check proves, and the harness bugs that misreported healthy engines |
 | [docs/cudagraph-stride-defect.md](docs/cudagraph-stride-defect.md) | the graphs x DSpark defect, six falsified theories, the rejected patch, and the ceiling bug |
+| [docs/kv-offload-defect.md](docs/kv-offload-defect.md) | why the host KV tier ships disabled: the long-context engine death, the two crash signatures, and the falsified VRAM/ECC detours |
 | [docs/driver-overlay.md](docs/driver-overlay.md) | why the image is rebuilt from the pinned base |
 | [docs/dri-by-path.md](docs/dri-by-path.md) | the filtered DRM directory, and the two failure modes it prevents |
 | [docs/oneccl-and-p2p.md](docs/oneccl-and-p2p.md) | the IPC-handle wedge, the one knob that mitigates it, and why no-P2P cannot start here |
