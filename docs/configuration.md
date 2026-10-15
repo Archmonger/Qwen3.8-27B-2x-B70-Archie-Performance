@@ -59,9 +59,28 @@ Full write-up: [driver-overlay.md](driver-overlay.md).
 FP8 over INT4 here because the drafter was trained on FP8 hidden states. That
 pairing was decided in the **eager, k=4** era — suite 15.67 (FP8) vs 13.56 (INT4)
 tok/s, pos-0 acceptance 55-84% vs 45-61% — so the *ratio* is the finding; the
-absolute numbers describe a different configuration. The cost of FP8 is KV headroom:
-KV 9.97 GiB and 1.46x max concurrency at full 262k context, versus INT4's
-15.37 GiB / 2.25x. `[HW]` If you drop `MAX_MODEL_LEN` (262144), KV stops binding.
+absolute numbers describe a different configuration. The cost of FP8 is KV headroom.
+Compare like-for-like, both under `DTYPE=auto`: KV 9.97 GiB and 1.46x max concurrency
+at full 262k context, versus INT4's 15.37 GiB / 2.25x. `[HW]` If you drop
+`MAX_MODEL_LEN` (262144), KV stops binding.
+
+On the shipped `float16` default the FP8 side is **10.59 GiB / 1.58x = 415,029
+tokens** (`GPU KV cache size` and `Available KV cache memory` in the container log;
+`kv_cache_max_concurrency` on `/metrics`). The INT4 figures predate the dtype change
+and were never re-measured under it, so do not re-derive the FP8-vs-INT4 ratio from
+the 1.58x. The FP8 gain is a **two-knob** delta (+30,073 over the 384,956 auto
+baseline) — do not attribute it to one flag or add the per-knob numbers:
+`scripts/serve.sh`'s attribution table records +12,660 for the ssm pin alone and
+389,265 against a 384,956 control for `--dtype float16` alone, because the pool is
+leftover memory over a page size that both dtypes move.
+
+FP8 KV is **load-bearing, not an optimization**: a measured `--kv-cache-dtype auto`
+(fp16) boot of this config fails at 262k, quoting 12.94 GiB needed against 10.58 GiB
+of available KV memory on *that* boot and estimating a maximum context of 212,480
+(`v1/core/kv_cache_utils.py:778`; all three figures are the engine's own words). Do not
+relax `KV_CACHE_DTYPE` and expect the full context. Do not extrapolate the headroom
+from the dtype width either: the pool also carries the GDN recurrent state, whose
+contribution is what the ssm pin below moves.
 
 `VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT=1` converts the ~29 GB of fp8 shards with CPU
 offload; without it, weight conversion exhausts device memory during load.
@@ -70,10 +89,10 @@ offload; without it, weight conversion exhausts device memory during load.
 
 | item | value | why |
 |---|---|---|
-| KV cache | `--kv-cache-dtype fp8` | the measured config; FP8 KV is the difference between 1.46x and (on INT4) 2.25x concurrency headroom at 262k |
+| KV cache | `--kv-cache-dtype fp8` | the measured config, and **required** for the full 262k context (a measured fp16-KV boot caps out at 212,480). FP8 KV is the difference between 1.46x and (on INT4) 2.25x concurrency headroom at 262k — that pair is like-for-like, both under `DTYPE=auto`; the shipped `float16` default moves the FP8 side to 1.58x |
 | KV offload | `--kv-offloading-size 50` (GB) | host-memory tier. `0` **omits** the flag — passing a literal 0 is not the same thing |
-| mamba/SSM cache | default (`--dtype auto`) | this is a hybrid GDN/linear-attention arch (`Qwen3_5ForConditionalGeneration`, `linear_attention` on 3 of every 4 layers) |
-| engine dtype | `--dtype auto` | **do not force `--dtype float16`** — it downcasts the LM head and degrades output on this arch |
+| GDN recurrent state | `--mamba-ssm-cache-dtype float16` | this is a hybrid GDN/linear-attention arch (`Qwen3_5ForConditionalGeneration`, `linear_attention` on 3 of every 4 layers), so the recurrent state is a **second, separate** cache dtype and `auto` does not mean "inherit `--dtype`" — see `MAMBA_SSM_CACHE_DTYPE` below. Throughput-neutral on its own; it buys KV capacity and is what lets the ESIMD GDN core run alongside `--dtype float16` |
+| engine dtype | `--dtype float16` | **the measured-best value and the shipped default.** `--dtype auto` resolves to bfloat16 for this FP8 checkpoint and measures **-6.0%** C1 / **-8.0%** conc=10 against it; see `DTYPE` below. This row used to say the opposite — "**do not force `--dtype float16`** — it downcasts the LM head and degrades output on this arch" — and was wrong on both halves. The LM head stays bf16 under *either* setting (`scripts/serve.sh`: "weights stay fp8 and lm_head stays bf16 in both arms"), so `--dtype` downcasts nothing here; and "degrades output" did not reproduce either — the quality battery matched the control (`serve.sh`: paired GSM8K 29/30 on both arms *and* control, 19/20 exact-answer with the **same** single miss, 0/20 non-reproducible greedy outputs, correctness 15/15), and the load-bearing acceptance counts are unmoved (C1 `26 169 7.500`; 512 accepted in both windows on either dtype). The soft NAT draft count reads 272 rather than 256 — read [recorded-metrics.md](recorded-metrics.md) and the header of `scripts/bench/acceptance.sh` before treating that as a result. The row predates the W57 paired A/B that settled it |
 
 `int4_per_token_head` KV is not an option on XPU: it hits the 128 KiB local-data-
 shared-memory wall in the attention kernel. `fp8` is the only quantized KV dtype
@@ -109,7 +128,8 @@ command the measured run executed:
 ```
 vllm serve /models/target \
   --host 0.0.0.0 --port 8103 --served-model-name secondary \
-  --tensor-parallel-size 2 --dtype auto \
+  --tensor-parallel-size 2 --dtype float16 \
+  --mamba-ssm-cache-dtype float16 \
   --max-model-len 262144 --max-num-seqs 10 --max-num-batched-tokens 4096 \
   --block-size 64 \
   --enable-prompt-tokens-details --enable-auto-tool-choice \
@@ -142,6 +162,20 @@ Flags worth explaining:
   the pattern, so k=7 is a validated pin, not an optimum. `k != 7` also costs ~30%
   of single-stream speed (k=6/k=4 C1 ~101-105 vs k=7 151).
 - `--block-size 64` with `--max-num-batched-tokens 4096` — the measured pairing.
+- `--dtype float16` + `--mamba-ssm-cache-dtype float16` — the shipped, measured-best
+  permutation, and **two separate levers, not one**: `--dtype` buys essentially all
+  the speed (+6.0% C1, +8.0% conc=10, C1 TTFT -19.6%), while the ssm pin is the
+  capacity lever and is throughput-neutral by itself (+12,660 tokens alone, against
+  +4,309 for `--dtype` alone, and +30,073 with both set — non-additively). Passing
+  only `--dtype float16` boots and measures the same speed (243.15 vs 241.87 conc=10,
+  inside spread) but forfeits the capacity, because the GDN ESIMD core's gate demands
+  conv_state *and* ssm_state float16 — and `verify_and_update_config` has already
+  rewritten an `auto` ssm dtype to the checkpoint's `float32`. Neither flag downcasts
+  the LM head; it stays bf16 in every arm. The mechanism behind the `--dtype` win is
+  **unresolved** — the two `float16`-gated ESIMD paths are correlates, falsified as
+  the cause by ablation — so read the table in `scripts/serve.sh` before quoting a
+  reason for it. `DTYPE=auto` + `MAMBA_SSM_CACHE_DTYPE=auto` is the documented control
+  spelling that restores the pre-W57 bfloat16 baseline.
 - `--tool-call-parser qwen3_xml --reasoning-parser qwen3` + the chat-template kwargs
   — the serving surface `verify.sh` checks. `enable_thinking`/`preserve_thinking`
   via `--default-chat-template-kwargs` is what the reference numbers were measured
