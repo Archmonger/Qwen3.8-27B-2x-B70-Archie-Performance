@@ -136,7 +136,7 @@ command block and explanation in
 > measure at those values, or change the column and the cell together:
 
 > [!WARNING]
-> This recipe is W4A16, which has higher theoretical accuracy compared to W4A4, but comes with a performance penalty caused by the need to dequantize from 4 bit to 16 bit. Despite this, this recipe has fantastic speed metrics due to the B70 platform having support for 16 bit vector **and** and matrix operations. Note that FP16/BF16 are the lowest precisions on B70 that has both vector **and** matrix support, thus W4A16 theoretically has the best trade-offs for scalability.
+> This recipe is W4A16, which has higher theoretical accuracy compared to W4A4, but comes with a performance penalty caused by the need to dequantize from 4 bit to 16 bit. Despite this, this recipe has fantastic speed metrics due to the B70 platform having support for 16 bit vector **and** and matrix operations.
 
 > | Test Name | Concurrency | Tokens Generated | Value | Command |
 > |---|---:|---:|---:|---|
