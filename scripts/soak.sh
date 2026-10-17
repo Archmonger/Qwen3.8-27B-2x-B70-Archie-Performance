@@ -55,6 +55,11 @@ done
   || { echo "soak: no such profile: $PROFILE" >&2; exit 2; }
 _CLI_CTR="$CTR"
 . "$HERE/lib/profile-env.sh"; load_env_file "$HERE/../profiles/$PROFILE/$PROFILE.env"
+# Same host KV-tier overlay setup.sh applied, so every script resolves the tier
+# through one rule rather than each having its own idea of the profile value.
+# See scripts/lib/profile-env.sh.
+load_host_overlay "$HERE/../profiles/$PROFILE/$PROFILE.env" \
+  || { echo "soak: host env overlay is invalid (see above)" >&2; exit 2; }
 CTR="${_CLI_CTR:-$CONTAINER_NAME}"
 # The profile exports SERVED_NAME; conc.py's --model is required and this script runs
 # under `set -u`, so the served name has to be resolved here the way run-all.sh does it.

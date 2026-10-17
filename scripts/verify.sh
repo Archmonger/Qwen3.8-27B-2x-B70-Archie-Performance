@@ -35,6 +35,13 @@ PROF_ENV="$HERE/../profiles/$PROFILE/$PROFILE.env"
 # and would otherwise overwrite them.
 _CLI_CTR="$CTR"; _CLI_PORT="$PORT"; _CLI_MNAME="$MNAME"
 . "$HERE/lib/profile-env.sh"; load_env_file "$PROF_ENV"
+# Same host overlay setup.sh applied. This matters more here than anywhere: the
+# `off` rule below compares the engine's printed kv_offloading_size against
+# want_off, so if verify.sh resolved the tier from the profile alone it would
+# demand 0 from a container setup.sh created at 50 -- a false FAIL on a perfectly
+# good boot, and the reverse (overlay missing here, present there) a false PASS.
+# Both scripts must read the tier through one rule, not two.
+load_host_overlay "$PROF_ENV" || { echo "verify: host env overlay is invalid (see above)" >&2; exit 2; }
 . "$HERE/lib/attest.sh"
 # The dtype engagement rules live in engage.sh and are shared with the arm
 # harness, whose falsification harness proves they can fail. verify.sh reuses
@@ -90,8 +97,14 @@ fi
 echo "[2/5] config attestation (engine's own log, not the env file)"
 want_ceil=$(( ${MAX_NUM_SEQS:-10} * (1 + ${NUM_SPEC_TOKENS:-7}) ))
 want_k="${NUM_SPEC_TOKENS:-}"; want_kv="${KV_CACHE_DTYPE:-}"
-attest "$LOG" "$want_ceil" "$want_k" "$want_kv" > "$WORK/verdicts" 2>/dev/null
-attest_labels "$want_ceil" "$want_k" "$want_kv" > "$WORK/labels"
+# The host KV tier is attested in both directions, and always stated: "0" is an
+# intent (the launcher default), not an absence of one. This is the check that
+# catches the create-time trap in docs/configuration.md -- the value is baked into
+# Config.Env when the container is CREATED, so an edited profile plus a mere
+# `docker restart` leaves the engine on the OLD tier and everything else green.
+want_off="${KV_OFFLOAD_SIZE:-0}"
+attest "$LOG" "$want_ceil" "$want_k" "$want_kv" "$want_off" > "$WORK/verdicts" 2>/dev/null
+attest_labels "$want_ceil" "$want_k" "$want_kv" "$want_off" > "$WORK/labels"
 # Join on the rule name. A rule with a verdict but no label (or vice versa) is a
 # harness edit that only half landed, so it is reported rather than dropped.
 while IFS='|' read -r _ name verdict detail; do

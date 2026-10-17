@@ -18,8 +18,8 @@
 # It reads the ENGINE'S OWN printed config, never the env file: an env var vLLM
 # ignores, or one an image rebuild silently dropped, must not be attestable.
 
-attest_labels() { # $1=want_ceiling $2=want_k $3=kv
-  local want_k="${2:-}" kv="${3:-}"
+attest_labels() { # $1=want_ceiling $2=want_k $3=kv [$4=want_offload]
+  local want_k="${2:-}" kv="${3:-}" want_off="${4:-}"
   echo "rule|ceil|max_cudagraph_capture_size=$1 (MAX_NUM_SEQS x (1+k))"
   echo "rule|ladder|capture ladder contains the $1-token saturated batch"
   echo "rule|cg|cudagraph_mode=FULL_DECODE_ONLY"
@@ -30,6 +30,11 @@ attest_labels() { # $1=want_ceiling $2=want_k $3=kv
   echo "rule|fatal|no fatal signature in the engine log"
   echo "rule|v2|V2 model runner (required by dspark)"
   [[ -n "$kv" ]] && echo "rule|kv|KV cache dtype $kv"
+  # Emitted whenever the caller states an intent either way: "50" means the tier
+  # must be there at that size, "0"/"off" means it must NOT be there at all. Both
+  # directions need a verdict, because both are silent failures -- and the off
+  # direction is the one that can only fail by absence.
+  [[ -n "$want_off" ]] && echo "rule|off|host KV tier kv_offloading_size=$want_off"
 }
 
 # Slice a `docker logs --timestamps` log down to one boot.
@@ -69,8 +74,8 @@ boot_slice() {
 }
 
 attest() { # $1=log $2=want_ceiling $3=want_k (empty = skip) $4=kv dtype (empty = skip)
-  local LOG="$1" want_ceil="$2" want_k="${3:-}" kv="${4:-}"
-  local ceil cg nsp meth sched sizes maxsize cap nbad=0
+  local LOG="$1" want_ceil="$2" want_k="${3:-}" kv="${4:-}" want_off="${5:-}"
+  local ceil cg nsp meth sched sizes maxsize cap off want_on got_on same nbad=0
 
   # The ceiling number alone is not proof: vLLM builds the capture ladder FROM it,
   # and if the ladder does not contain the saturated batch size then that batch is
@@ -133,6 +138,48 @@ attest() { # $1=log $2=want_ceiling $3=want_k (empty = skip) $4=kv dtype (empty 
       _attest_ok kv
     else
       _attest_bad kv "KV cache dtype $kv not confirmed in the log"
+    fi
+  fi
+
+  # 11. Host KV tier, when the profile declares an intent either way.
+  #
+  # Why this rule exists at all: the value is baked into Config.Env at container
+  # CREATE (see docs/configuration.md), so `docker restart` does not change it --
+  # only a recreate does. That makes "the profile says 50 and the running engine
+  # has none" a silent failure this file exists to catch, and it is the same class
+  # as every other rule here: an env var the engine never received.
+  #
+  # Both directions are attested. vLLM omits kv_offloading_size from its printed
+  # config entirely when it is None, so the tier-off case can only be proven by
+  # ABSENCE -- which is exactly the direction a check-without-this-rule gets
+  # backwards, passing a tier that quietly came up on 50 GB.
+  #
+  # "Is the flag passed at all" is decided the same way scripts/serve.sh decides
+  # it -- a literal `!= "0"` -- so the two cannot disagree about what "on" means.
+  # That is what makes an engine reporting 0.0 a FAIL against a wanted 0: serve.sh
+  # would have passed --kv-offloading-size 0.0, and config/vllm.py builds
+  # OffloadingConnector for anything that is not None, so 0.0 is tier-ON with a
+  # zero-byte store, not tier-off. A purely numeric comparison would merge the two.
+  if [[ -n "$want_off" ]]; then
+    off=$(grep -oE "kv_offloading_size.: [0-9]+(\.[0-9]+)?" "$LOG" 2>/dev/null \
+          | tail -1 | grep -oE '[0-9]+(\.[0-9]+)?$')
+    # Explicit if, not `[[ ]] && a=1 || a=0`: that form also runs the || branch
+    # when the && branch's own assignment is falsy, and reads as a ternary it is
+    # not.
+    if [[ "$want_off" == "0" ]]; then want_on=0; else want_on=1; fi
+    if [[ -n "$off" ]]; then got_on=1; else got_on=0; fi
+    # Numeric compare, deliberately not string and not a suffix strip: the engine
+    # prints 50.0 and the profile says 50. `${off%.0}` -- the tempting one-liner --
+    # is wrong, because the pattern `.0` is "any char then 0", so it mangles the
+    # integer side too ("50" becomes "5") and the two sides never match.
+    same=$(awk -v a="${off:-0}" -v b="$want_off" \
+             'BEGIN { print (a + 0 == b + 0) ? "1" : "0" }')
+    if [[ "$want_on" != "$got_on" ]]; then
+      _attest_bad off "kv_offloading_size=${off:-absent (tier OFF)}, expected ${want_off} GB (baked at container CREATE; a restart will not fix it)"
+    elif [[ "$want_on" == "1" && "$same" != "1" ]]; then
+      _attest_bad off "kv_offloading_size=$off, expected ${want_off} GB (baked at container CREATE; a restart will not fix it)"
+    else
+      _attest_ok off
     fi
   fi
 

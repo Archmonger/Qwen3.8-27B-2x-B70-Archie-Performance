@@ -64,4 +64,53 @@ RUN set -eux; \
     ls -la libze_intel_gpu.so* libze_loader.so* libigc.so*; \
     python -c "import ctypes; ctypes.CDLL('libze_intel_gpu.so.1'); print('driver loads OK')"
 
-LABEL org.opencontainers.image.title="llm-scaler-vllm + OMIX 0.4.0 GPU driver stack"
+# --- KV-offload hotfix: vllm-project/vllm#52923, ported ---------------------
+#
+# The host KV tier (--kv-offloading-size) kills EngineCore at long context:
+# _build_store_jobs slices offload_keys and offload_block_ids from the same
+# request state and asserts they are equal, but blocks are allocated for a chunk
+# before Request.block_hashes yields that chunk's offload key, so the block slice
+# can be longer and the assert fires. Upstream fixed it in #52923 (merged
+# 2026-09-03, fixes #52170); this image's vllm commit (568afb3a1, 2026-07-26)
+# predates that merge, so the defect is live here. See ../docs/kv-offload-defect.md.
+#
+# The patch cannot be applied verbatim: this build's storable_chunks() predates the
+# PR's *base* too -- it has neither of the two extra bounds upstream applies. So the
+# patch is a port (see its header), and these two hashes are what make the port
+# trustworthy rather than aspirational:
+#
+#   PRE  asserts we are patching the exact file the port was written against. If the
+#        pinned base moves, this fails HERE, loudly, instead of producing an image
+#        with a half-applied patch -- or, worse, `patch` fuzzing a hunk into the
+#        wrong place and the build succeeding.
+#   POST asserts the result is the exact bytes the port was reviewed as. The ported
+#        storable_chunks() is byte-identical to upstream's post-fix function.
+#
+# Both are compared against the file at the path vllm itself reports, not a
+# hard-coded site-packages path, so a relocated venv cannot silently skip the patch.
+# The __pycache__ entry is removed because its .pyc is timestamp-validated: leaving a
+# stale one next to a fresh .py is how a patched file gets ignored at import.
+#
+# The last step IMPORTS the patched module rather than merely parsing it. ast.parse
+# passes files that cannot load: this port adds an unquoted `group_state:
+# RequestGroupState` annotation, and an annotation whose name is not in scope at
+# def-time is a NameError at import time -- after PRE matched, after POST matched,
+# and after a parse-only check had printed its OK. PYTHONDONTWRITEBYTECODE keeps
+# that import from baking the whole vllm chain as .pyc into this layer. Importing
+# the module also arity-checks every storable_chunks() call site, which no hash can.
+ARG KV_OFFLOAD_PATCH_PRE=89ac26a80fbc29b9bcaa5a0daba88fb6309247f9bb053e48d2d61efa7d9d66f1
+ARG KV_OFFLOAD_PATCH_POST=9179a76b383779e8c6dc8d993543eb8fe77cc60c7599dc0436c1b0a0d0e5d904
+COPY patches/kv-offload-52923.patch /tmp/kv-offload-52923.patch
+RUN set -eux; \
+    V="$(PYTHONDONTWRITEBYTECODE=1 python -c 'import vllm,os;print(os.path.dirname(vllm.__file__))')"; \
+    F="$V/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py"; \
+    test -f "$F"; \
+    printf '%s  %s\n' "$KV_OFFLOAD_PATCH_PRE"  "$F" | sha256sum -c -; \
+    ( cd "$V" && patch -p1 --no-backup-if-mismatch -i /tmp/kv-offload-52923.patch ); \
+    printf '%s  %s\n' "$KV_OFFLOAD_PATCH_POST" "$F" | sha256sum -c -; \
+    rm -rf "$V/distributed/kv_transfer/kv_connector/v1/offloading/__pycache__"; \
+    rm -f /tmp/kv-offload-52923.patch; \
+    python -c "import ast,sys; ast.parse(open(sys.argv[1]).read()); print('kv-offload hotfix parses OK')" "$F"; \
+    PYTHONDONTWRITEBYTECODE=1 python -c "import vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler as m; print('kv-offload hotfix imports OK', m.RequestGroupState.__name__)"
+
+LABEL org.opencontainers.image.title="llm-scaler-vllm + OMIX 0.4.0 GPU driver stack + vllm#52923 KV-offload hotfix"

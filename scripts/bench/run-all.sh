@@ -45,6 +45,11 @@ done
 [[ -f "$HERE/../../profiles/$PROFILE/$PROFILE.env" ]] \
   || { echo "run-all: no such profile: $PROFILE" >&2; exit 2; }
 . "$HERE/../lib/profile-env.sh"; load_env_file "$HERE/../../profiles/$PROFILE/$PROFILE.env"
+# Same host KV-tier overlay setup.sh applied, so the measured table is recorded
+# under the tier the container actually booted with rather than the repo default.
+# See scripts/lib/profile-env.sh.
+load_host_overlay "$HERE/../../profiles/$PROFILE/$PROFILE.env" \
+  || { echo "run-all: host env overlay is invalid (see above)" >&2; exit 2; }
 PORT="${PORT:-8103}"; MNAME="${SERVED_NAME:-secondary}"
 
 # The grid the README table is built from: one test x one concurrency per cell, and
