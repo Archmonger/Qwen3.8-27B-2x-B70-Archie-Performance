@@ -116,6 +116,12 @@ esac
 # it parses rather than sources.
 . "$REPO/scripts/lib/profile-env.sh"
 load_env_file "$ENV_FILE"
+# Host-only KV tier override, applied after the profile and before the CLI so the
+# precedence is profile < host.env < CLI. The same file is handed to compose below,
+# which is what keeps the value this script attests and the value baked into the
+# container's Config.Env a single value rather than two. Restricted to one key by
+# design -- see scripts/lib/profile-env.sh.
+load_host_overlay "$ENV_FILE" || die "host env overlay is invalid (see above)"
 
 # CLI wins over the env file.
 [[ -n "${_CLI_MODELS_DIR:-}"    ]] && MODELS_DIR="$_CLI_MODELS_DIR"
@@ -291,6 +297,27 @@ fi
 # invocation here as the README documents for the manual path means a broken
 # devices.env generation fails at this check instead of at container creation.
 compose_files=(--env-file "$ENV_FILE")
+# A third env file when the host carries one, appended HERE rather than at the
+# start path: the --dry-run branch below exits before that point, so appending it
+# there would make the dry run render KV_OFFLOAD_SIZE from the committed profile
+# while the real start used the host value -- two answers to one question, and the
+# render check would then attest a config that never ships. Compose takes the LAST
+# file that defines a key, and devices.env defines none that this one does.
+# A missing file must not be passed: docker compose hard-fails on it.
+if HOST_OVERLAY="$(host_overlay_path "$ENV_FILE")"; then
+  say "ok      host env overlay in force: $HOST_OVERLAY -> KV_OFFLOAD_SIZE=$KV_OFFLOAD_SIZE"
+  compose_files+=(--env-file "$HOST_OVERLAY")
+else
+  # Stated on every run, not only when an overlay exists. The value can disappear:
+  # host.env is gitignored, so `git clean -fdx` deletes it, and a silent fall back
+  # to the committed 0 would leave a box running a different configuration while
+  # every check still passed -- setup.sh and verify.sh would both read the same
+  # missing file and agree with each other. Naming the resolved value, and that it
+  # came from the profile alone, is what makes that visible. No hint here about
+  # turning the tier on: this repo ships it off, and profiles/fp8/fp8.env plus
+  # docs/kv-offload-defect.md carry the tradeoffs for anyone who decides otherwise.
+  say "ok      no host env overlay; KV_OFFLOAD_SIZE=${KV_OFFLOAD_SIZE:-0} from $ENV_FILE"
+fi
 
 write_devices_env() { # $1=path
   {
@@ -478,6 +505,26 @@ if [[ $DO_START -eq 1 ]]; then
   # "Free memory on device xpu:1 ... less than desired" / OUT_OF_RESOURCES, which
   # reads like a VRAM problem and is not one.
   if docker ps -a --format '{{.Names}}' | grep -qx "$CTR"; then
+    # Tier drift, said BEFORE the old container is destroyed. Nothing in this
+    # repository sets the tier non-zero, so the only way a running container can
+    # have a non-zero KV_OFFLOAD_SIZE baked in is that it was created from a
+    # host.env overlay -- and if the resolved value is now 0, that overlay is gone
+    # (typically `git clean -fdx`, which deletes gitignored files). Silently
+    # recreating at 0 would then leave this box on a different configuration while
+    # verify.sh still passed, because verify.sh reads the same missing file and
+    # agrees. Not a hard stop: removing the overlay deliberately, to turn the tier
+    # off, produces the identical signature, and only the operator knows which
+    # this is. Said at the one moment the old value still exists to be compared.
+    prev_tier=$(docker inspect --format '{{json .Config.Env}}' "$CTR" 2>/dev/null \
+      | tr ',' '\n' | grep -oE 'KV_OFFLOAD_SIZE=[0-9.]+' | tail -1 | cut -d= -f2)
+    if [[ -n "${prev_tier:-}" && "${prev_tier}" != "0" \
+          && "${KV_OFFLOAD_SIZE:-0}" == "0" ]]; then
+      warn "container $CTR was CREATED with KV_OFFLOAD_SIZE=$prev_tier but the"
+      warn "  resolved value is now 0 -- the host.env overlay is missing, so this"
+      warn "  recreate will DROP the host KV tier. If that is not what you intended:"
+      warn "  create $(dirname "$ENV_FILE")/host.env containing KV_OFFLOAD_SIZE=$prev_tier"
+      warn "  and re-run. If it IS what you intended, this is expected."
+    fi
     say "removing existing container $CTR"
     docker rm -f "$CTR" >/dev/null 2>&1 || die "could not remove $CTR"
   fi

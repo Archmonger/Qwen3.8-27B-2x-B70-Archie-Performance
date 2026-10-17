@@ -35,6 +35,13 @@ PROF_ENV="$HERE/../profiles/$PROFILE/$PROFILE.env"
 # and would otherwise overwrite them.
 _CLI_CTR="$CTR"; _CLI_PORT="$PORT"; _CLI_MNAME="$MNAME"
 . "$HERE/lib/profile-env.sh"; load_env_file "$PROF_ENV"
+# Same host overlay setup.sh applied. This matters more here than anywhere: the
+# `off` rule below compares the engine's printed kv_offloading_size against
+# want_off, so if verify.sh resolved the tier from the profile alone it would
+# demand 0 from a container setup.sh created at 50 -- a false FAIL on a perfectly
+# good boot, and the reverse (overlay missing here, present there) a false PASS.
+# Both scripts must read the tier through one rule, not two.
+load_host_overlay "$PROF_ENV" || { echo "verify: host env overlay is invalid (see above)" >&2; exit 2; }
 . "$HERE/lib/attest.sh"
 # The dtype engagement rules live in engage.sh and are shared with the arm
 # harness, whose falsification harness proves they can fail. verify.sh reuses

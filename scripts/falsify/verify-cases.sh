@@ -27,10 +27,13 @@ WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 WANT_CEIL=80
 WANT_K=7
 WANT_KV=fp8
-# Matches profiles/fp8/fp8.env's KV_OFFLOAD_SIZE. Stated, not left blank: the tier
-# is attested in both directions, and "0" is an intent rather than an absence of
-# one. The cases below cover both, including the wanted-0 direction that can only
-# be proven by the key being ABSENT from the engine's own config dump.
+# Deliberately 50 while profiles/fp8/fp8.env ships 0. This fixture models a
+# tier-ON boot -- the arm with the crash history, and the one a host.env overlay
+# turns on -- so the primary fixture exercises the path where an unattested tier
+# actually costs something. The committed default is not left untested: the
+# "wanted 0" block below drives the same rule with want=0, including the
+# proof-by-ABSENCE case that only the off direction has. Stated rather than left
+# blank because "0" is an intent, not an absence of one.
 WANT_OFF=50
 
 # The fixture is a Python-dict config dump in the shape vLLM actually prints: keys

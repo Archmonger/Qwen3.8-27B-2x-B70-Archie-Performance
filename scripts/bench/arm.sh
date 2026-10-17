@@ -123,6 +123,15 @@ done
 unset _k _kv _i
 
 load_env_file "$PROFILE_ENV"
+# Host KV-tier overlay, applied AFTER the profile but BEFORE the caller's argv
+# overrides, so precedence is profile < host.env < explicit ARM ARGUMENT. That
+# order is what keeps the tier A/B honest: an arm that means to vary the tier says
+# so on argv and wins, while a profile-default arm measures the box as configured.
+# Without it an arm would silently boot at the repo default of 0 while production
+# ran at the host value, and both arms would still look recorded and clean.
+# See scripts/lib/profile-env.sh.
+load_host_overlay "$PROFILE_ENV" \
+  || { echo "arm: host env overlay is invalid (see above)" >&2; exit 2; }
 
 # Re-apply the caller's overrides on top of the profile.
 for _kv in ${CALLER_OVERRIDES[@]+"${CALLER_OVERRIDES[@]}"}; do export "$_kv"; done
@@ -179,14 +188,16 @@ DRAFTER_SRC=$DRAFTER_DIR
 # value. An explicit MAMBA_SSM=... argument still wins below, and MAMBA_SSM=auto
 # restores the omitted-flag control arm.
 DTYPE=${DTYPE:-}; MAMBA_SSM=${MAMBA_SSM_CACHE_DTYPE:-}; KVDT=${KV_CACHE_DTYPE:-fp8}
-# The host KV tier is seeded from the profile for the same reason, and it matters
-# now that profiles/fp8/fp8.env turns the tier ON: nothing on the docker line
-# passed KV_OFFLOAD_SIZE, so serve.sh fell back to its own default of 0 and EVERY
-# arm booted tier-off while production booted tier-on. Arm numbers would then have
-# been tier-off numbers labelled as the shipping config -- and a KV_OFFLOAD_SIZE=
-# arm argument landing in PASS_ENV would have looked like it varied something
-# while the attestation said nothing either way. Seeding keeps the arm, the row
-# stamp, and the `off` attestation all reading the value the container got.
+# The host KV tier is seeded from the resolved profile -- fp8.env plus the
+# gitignored host.env, both applied above via load_host_overlay -- for the same
+# reason, and it matters now that one box runs the tier ON through that overlay:
+# nothing on the docker line passed KV_OFFLOAD_SIZE, so serve.sh fell back to its
+# own default of 0 and EVERY arm booted tier-off while production booted tier-on.
+# Arm numbers would then have been tier-off numbers labelled as the shipping
+# config -- and a KV_OFFLOAD_SIZE= arm argument landing in PASS_ENV would have
+# looked like it varied something while the attestation said nothing either way.
+# Seeding from the resolved value keeps the arm, the row stamp, and the `off`
+# attestation all reading what the container actually got.
 KV_OFF=${KV_OFFLOAD_SIZE:-0}
 # Arm-only, like MAMBA_SSM/NEEDLE: it names what an unpinned arm is expected to
 # resolve to, so the container has no use for it and it must not ride along in

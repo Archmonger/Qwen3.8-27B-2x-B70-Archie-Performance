@@ -3,6 +3,19 @@
 profiles/*/runstate/
 .runstate/
 
+# Per-machine overrides, read after the committed profile by every script that
+# loads it. Only KV_OFFLOAD_SIZE is admitted; scripts/lib/profile-env.sh refuses
+# every other key so the committed profile stays the single source of truth for
+# anything that moves a measured number.
+#
+# The failure this exists to prevent is the uncommitted local edit: keeping a host
+# value written into profiles/*/<profile>.env means `git checkout` or `git pull`
+# silently reverts it to the repo default while every check still passes. gitignore
+# makes the host value invisible to git in the direction that matters -- it cannot
+# be committed -- while keeping it out of the checkout's blast radius. Note the
+# corollary: `git clean -fdx` deletes it. Recreate from docs/kv-offload-defect.md.
+profiles/*/host.env
+
 *.log
 __pycache__/
 *.pyc

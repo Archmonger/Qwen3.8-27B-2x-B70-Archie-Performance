@@ -195,6 +195,13 @@ EOF
   # -------------------------------------------------------------------------
   echo
   echo "=== kv-patch gate (setup.sh end-to-end) ==="
+  # These cases drive setup.sh's verdict by rewriting KV_OFFLOAD_SIZE in the
+  # profile. A host.env next to that profile would win over the value just
+  # written and every case would then test the same tier -- case A could report
+  # "refused" for a reason unrelated to the mutation, and the tier-off cases would
+  # silently run tier-on. Empty string means "no overlay", distinct from unset
+  # (which means "use the default path"); see scripts/lib/profile-env.sh.
+  export KV_HOST_ENV=""
   ENVF="$REPO/profiles/fp8/fp8.env"
   if [[ ! -f "$ENVF" ]]; then
     skip "no profile at $ENVF"

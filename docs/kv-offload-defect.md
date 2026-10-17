@@ -1,16 +1,25 @@
 # The KV-offload connector defect
 
 Status: **root-caused to the connector; signature 1 fixed by a ported upstream patch.**
-Two separate decisions, and they are deliberately not the same:
+**The repository ships it off, everywhere, and that is the whole rule.** Both
+`scripts/serve.sh` and `profiles/fp8/fp8.env` set `KV_OFFLOAD_SIZE=0`, which omits
+`--kv-offloading-size` entirely. Nothing a reader clones from this repo inherits a
+tier that has never served a single read here and once took the engine down on one
+long request.
 
-- **The launcher default is off.** `scripts/serve.sh` defaults `KV_OFFLOAD_SIZE=0`,
-  which omits `--kv-offloading-size` entirely. Nothing that does not opt in pays for a
-  tier that has never served a read here.
-- **`profiles/fp8/` turns it back on at 50 GB** — the tier is wanted there for
-  capacity. That is only safe behind the hotfix in `image/patches/kv-offload-52923.patch`,
-  which this build needs because its vLLM commit predates the upstream fix; `setup.sh`
-  refuses to start the tier-on/unpatched pairing rather than leaving it to fail on a
-  long request.
+One box runs it at 50 GB, and the way it does so is the part worth copying if you
+want the same: a gitignored `profiles/fp8/host.env` containing `KV_OFFLOAD_SIZE=50`.
+It is read after the profile by every script that loads one and handed to compose as
+the final `--env-file`, so the value attested and the value baked into the container
+cannot disagree; it may set that one key and nothing else. The reason it is not an
+uncommitted edit to `fp8.env` is that such an edit is silently reverted by the next
+`git checkout` while every check still passes — a config that changes underneath you.
+Full mechanics in [configuration.md](configuration.md).
+
+Enabling it at all is only safe behind the hotfix in
+`image/patches/kv-offload-52923.patch`, which this build needs because its vLLM
+commit predates the upstream fix; `setup.sh` refuses to start the tier-on/unpatched
+pairing rather than leaving it to fail on a long request.
 
 Do not treat the tier as a throughput knob: on this workload it serves no reads (see
 below), so treat it as capacity headroom. And do not enable it on an image that has not
@@ -111,12 +120,13 @@ tier off reproduces `10.59 GiB / 415,029 tokens / 1.58x`, the figures
 [configuration.md](configuration.md) publishes for the shipped `float16` default. So
 this is not a memory-for-memory trade.
 
-That identity is not inferred from the A/B alone: it was re-confirmed on the shipping
-config itself. The live `profiles/fp8` container boots with `kv_offloading_size:
-50.0` in its non-default args and reports `Available KV cache memory: 10.59 GiB` /
-`GPU KV cache size: 415,029 tokens` — the same pair, with the tier **on**. So the KV
-capacity figures in [configuration.md](configuration.md) hold with the tier on,
-because the pool they are read from did not change.
+That identity is not inferred from the A/B alone: it was re-confirmed on the one box
+that runs the tier. Its live `profiles/fp8` container boots with `kv_offloading_size:
+50.0` in its non-default args — from `host.env`, not from the committed profile — and
+reports `Available KV cache memory: 10.59 GiB` / `GPU KV cache size: 415,029 tokens`,
+the same pair, with the tier **on**. So the KV capacity figures in
+[configuration.md](configuration.md) hold with the tier on, because the pool they are
+read from did not change.
 
 What that does **not** license is a claim about the README's throughput table. Those
 numbers were recorded with the flag omitted, and this file has no tok/s A/B across

@@ -128,8 +128,13 @@ GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.92}"
 # it is not a performance knob on this deployment (it never serves a read --
 # kv_offload_cpu_cache_read_usage_perc and the external prefix-cache hit rate both
 # stay 0.0 across every boot measured) and it consumes host RAM proportional to use,
-# so a launcher-wide default of "on" would cost RAM and buy nothing. profiles/fp8
-# opts in at 50 GB deliberately, where the capacity is wanted.
+# so a launcher-wide default of "on" would cost RAM and buy nothing. Nothing in
+# this repository sets it non-zero: profiles/fp8/fp8.env ships 0 too, and the one
+# box that wants the capacity sets it in the gitignored profiles/fp8/host.env,
+# which compose bakes into this container's environment at create. By the time
+# this line runs we are inside that container and cannot see the overlay -- the
+# value simply arrives, which is why the default here is a backstop and not the
+# thing anyone should expect to be relying on.
 #
 # A non-zero value here is only safe on an image carrying the vllm#52923 KV-offload
 # hotfix (image/patches/); without it, a single long request kills EngineCore with an

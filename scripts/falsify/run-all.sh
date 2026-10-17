@@ -17,7 +17,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fails=0
 for h in "$HERE"/verify-cases.sh "$HERE"/setup-guards.sh "$HERE"/acceptance-cases.sh \
          "$HERE"/conc-cases.sh "$HERE"/prefill-cases.sh "$HERE"/arm-cases.sh \
-         "$HERE"/engage-cases.sh "$HERE"/kv-patch-cases.sh; do
+         "$HERE"/engage-cases.sh "$HERE"/kv-patch-cases.sh "$HERE"/host-env-cases.sh; do
   echo
   echo "################ $(basename "$h")"
   # 1800s covers kv-patch-cases' mutant-image build; the synthetic harnesses finish
