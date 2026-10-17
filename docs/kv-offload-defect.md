@@ -1,9 +1,20 @@
 # The KV-offload connector defect
 
-Status: **root-caused to the connector, disabled by default.** `profiles/fp8/` ships
-`KV_OFFLOAD_SIZE=0`, which omits `--kv-offloading-size` entirely. Do not re-enable it
-without reading this file, and do not treat it as a tuning knob — on this deployment
-it is a crash vector that buys nothing.
+Status: **root-caused to the connector; signature 1 fixed by a ported upstream patch.**
+Two separate decisions, and they are deliberately not the same:
+
+- **The launcher default is off.** `scripts/serve.sh` defaults `KV_OFFLOAD_SIZE=0`,
+  which omits `--kv-offloading-size` entirely. Nothing that does not opt in pays for a
+  tier that has never served a read here.
+- **`profiles/fp8/` turns it back on at 50 GB** — the tier is wanted there for
+  capacity. That is only safe behind the hotfix in `image/patches/kv-offload-52923.patch`,
+  which this build needs because its vLLM commit predates the upstream fix; `setup.sh`
+  refuses to start the tier-on/unpatched pairing rather than leaving it to fail on a
+  long request.
+
+Do not treat the tier as a throughput knob: on this workload it serves no reads (see
+below), so treat it as capacity headroom. And do not enable it on an image that has not
+been through the patched Dockerfile.
 
 Host these numbers came from: 2x Intel Arc Pro B70, TP2, XPU, image
 `vllm-llmscaler:icr26.35`, vLLM `0.26.1.dev0+g568afb3a1.d20260907`, target
@@ -79,8 +90,9 @@ Both long-context results above came from one boot each. The flag-omitted config
 passes the repo's own gates, which is what says the fix did not silently break the
 measured configuration: `scripts/verify.sh` → correctness 15/15, acceptance
 `C1 26 169 7.500` / `NAT 272 512 2.882`, `VERIFY: PASS`, and
-`scripts/falsify/run-all.sh` → 8/8 harnesses. Each harness attests what it saw on its
-own boot; the numbers above are from the boot that served the long-context ladder.
+`scripts/falsify/run-all.sh` → every harness green. Each harness attests what it saw
+on its own boot; the numbers above are from the boot that served the long-context
+ladder. (No count is quoted: this line said "8/8" when the suite held 7.)
 
 ## Why it is safe to leave off: the tier never served a read
 
@@ -95,9 +107,45 @@ every boot measured with the flag present:
 It is not free, either. It is not the GPU that pays — the KV pool is **identical**
 with and without the tier. The A/B ran at `GPU_MEM_UTIL=0.91` and measured
 `10.29 GiB / 403,165 tokens / 1.54x` in both arms; the shipped `0.92` boot with the
-tier off reproduces `10.59 GiB / 415,029 tokens / 1.58x`, the same figures the README
-publishes. So this is not a memory-for-memory trade. The **host** pays, and it
-pays progressively: the store is not a boot-time reservation but grows with offload
+tier off reproduces `10.59 GiB / 415,029 tokens / 1.58x`, the figures
+[configuration.md](configuration.md) publishes for the shipped `float16` default. So
+this is not a memory-for-memory trade.
+
+That identity is not inferred from the A/B alone: it was re-confirmed on the shipping
+config itself. The live `profiles/fp8` container boots with `kv_offloading_size:
+50.0` in its non-default args and reports `Available KV cache memory: 10.59 GiB` /
+`GPU KV cache size: 415,029 tokens` — the same pair, with the tier **on**. So the KV
+capacity figures in [configuration.md](configuration.md) hold with the tier on,
+because the pool they are read from did not change.
+
+What that does **not** license is a claim about the README's throughput table. Those
+numbers were recorded with the flag omitted, and this file has no tok/s A/B across
+the switch. The strongest tier-on evidence held is behavioural rather than a rate:
+`scripts/verify.sh` against the live tier-on container reproduces the tier-off
+acceptance fingerprint exactly — `C1 26 169 7.500` / `NAT 272 512 2.882`, the same
+draft counts and mean accepted length, with correctness 15/15 and serving surface
+5/5. Identical acceptance geometry and an identical KV pool make a throughput
+regression unlikely, and that is why the table was not re-measured; it is still an
+argument, not a measurement, and the table's own provenance note already says the
+absolute tok/s figures are one box's. Re-measure with `scripts/bench/arm.sh` before
+quoting them as tier-on:
+
+```bash
+# Production owns both GPUs, so stop it first; two engines on one pair both
+# mis-size the KV pool and the numbers mean nothing. LABEL and PORT are
+# positional, and PORT must not be production's 8103.
+scripts/bench/arm.sh tier-on  8199
+scripts/bench/arm.sh tier-off 8199 KV_OFFLOAD_SIZE=0
+```
+
+`arm.sh` seeds the tier from the profile, passes it to the container, prints it on
+the launch line as `tier=<n>GB`, and `attest.sh` refuses an arm whose engine
+disagrees — all three of which were missing when the tier was switched on, and each
+of which on its own is enough to produce a table of tier-off numbers labelled as
+the shipping config.
+
+The **host** pays, and it pays progressively: the store is not a boot-time
+reservation but grows with offload
 activity. One boot measured 87.6 GiB available at ~2 minutes old, still loading
 shards, and 8.8 GiB after the verify pass had driven traffic through it. A fresh boot
 with the flag omitted sits at 80–88 GiB after the same work. The store does not
@@ -115,15 +163,85 @@ length, which is exactly the axis this defect breaks on.
 
 ## Upstream
 
-Unfixed at the time of writing. The assert in signature 1 is reported verbatim in
-[vllm-project/vllm#55503](https://github.com/vllm-project/vllm/issues/55503)
-(open, spec-decode + offloading, same call path); the sibling
-[#56795](https://github.com/vllm-project/vllm/issues/56795) (open) describes
-`next_stored_block_idx` advancing for every KV group when no keys were stored, which
-is the same key/block desync from the other side. The candidate fix
-[#53648](https://github.com/vllm-project/vllm/pull/53648) ("Fix offloading scheduler
-chunk bounds race") is **not merged**. Worth re-checking those three before deciding
-the tier is permanently unusable — but nothing here should wait on them.
+**Correction, recorded because an earlier version of this file got it wrong.** This
+section originally said "unfixed at the time of writing" and pointed at #55503, #56795
+and PR #53648. Those are real related reports, but they are not the fix, and the fix
+did exist: **[vllm-project/vllm#52923](https://github.com/vllm-project/vllm/pull/52923)**
+"[Bugfix] Wait for offload keys before storing chunks" was merged 2026-09-03 (merge
+commit `092334c82`, fixes #52170). The mistake was searching for the assert text among
+open issues instead of the merged history. Re-checking upstream is cheap and this is
+the cost of not doing it.
+
+The reason the defect is live here despite that merge: the image pins
+`intel/llm-scaler-vllm:0.26.0-b2`, whose vLLM commit `568afb3a1` is dated 2026-07-26 —
+five weeks before the merge. The `.d20260907` in `0.26.1.dev0+g568afb3a1.d20260907` is
+the *build* date, not the commit date, which is what made it look current. Check the
+commit, not the tag.
+
+The shipped hotfix is `image/patches/kv-offload-52923.patch`, applied in
+`image/Dockerfile`. It is a **port, not the upstream diff**: this build's
+`storable_chunks()` predates the PR's *base* as well, carrying neither of the two extra
+bounds upstream applies, so the upstream hunk has no context to match against. The
+ported function is byte-identical to upstream's post-fix version.
+
+The build pins two hashes — the pre-patch file hash and the post-patch file hash — so a
+moved base fails the build loudly instead of producing an image with a half-applied or
+mis-fuzzed patch. `setup.sh` then attests the *running* image, because `setup.sh`
+reuses an existing tag without rebuilding: edit the Dockerfile, run `setup.sh`, and you
+get the old unpatched image. Enabling the tier against an unpatched image is fatal
+there, and a warning while the tier is off (without the connector built the assert is
+unreachable, so the tier-off case is not worth blocking).
+
+The probe and its severity table live in `scripts/lib/kv-patch.sh`, and
+`scripts/falsify/kv-patch-cases.sh` exercises that same code: classifier cases
+(verdict under a torch warning on the same stdout stream, verdicts buried in prose,
+empty output, both verdicts at once), the severity table over
+state x `KV_OFFLOAD_SIZE`, and — when docker and the pinned base are present — the
+shipped image (must read `PATCHED`), the unpatched base (must read `UNPATCHED`), a
+mutant image with one bound `sed`-ed out (must read `UNPATCHED`), and a nonexistent
+image (must read `UNKNOWN`). The mutant case is what shows the gate is not vacuously
+green; without it, a probe that can only ever print `PATCHED` would leave the
+refusal decorative. Case counts are not quoted, for the same reason they are not
+quoted for `run-all.sh`.
+
+What #52923 does **not** cover: it fixes the key/block desync, i.e. signature 1. See
+"What is still not established" for signature 2, which the A/B tied to the same switch
+but whose kernel-level mechanism was never isolated.
+
+## Does the hotfix actually work here?
+
+Yes, on signature 1 — measured, not inferred. `scripts/bench/kv-ladder.py` is the
+gate: it replays the exact cells from "The A/B" above against the running engine with
+`KV_OFFLOAD_SIZE=50` on the patched image.
+
+| cell | pre-fix (same host, same argv; times are those quoted in "The A/B") | post-fix re-run, `kv-ladder.py`, 2026-10-16 07:40Z–07:54Z |
+|---|---|---|
+| single ~160k prompt x3 | **died 3/3** (`AssertionError` at 06:34:39, `DEVICE_LOST` at 06:39:08 and 07:41:22 — the earlier A/B boot, not this window) | `http=200`, `prompt_tokens=158803` x3, 113 s each, planted needle returned correctly on all 3 |
+| two concurrent ~160k | not measurable — the single-request cell killed the engine first | both `http=200`, `prompt_tokens=158805`, 116 s / 226 s, needles correct |
+| 93% of the window (target 243,793) | not reached | `http=200`, `prompt_tokens=241941`, 227 s, needle correct |
+| `restarts` / crash lines after the run | 1–2 | **0 / 0**, no `AssertionError`, `DEVICE_LOST`, or `Traceback` in the window |
+
+`cells=6 failed=none`, `restart_delta=0`, `err_delta=0`, at 19 GiB host
+`MemAvailable`. Since the engine booted, the connector has written `2.4955e+11` bytes
+GPU→CPU and read back `0.0` — it is doing the work, and still serving no reads,
+exactly as the "never served a read" section predicts. (That counter is cumulative
+since the 01:44Z boot, not the total for this one run.) That read/write pair is why
+this tier is shipped as capacity headroom and not as a speed knob.
+
+Two honesty notes about this table. First, the pre-fix column and this one are not
+a same-boot A/B: the pre-fix figures are the earlier 50 GB boot quoted above, and
+this re-run is one boot of the patched image. Second, every cell here is calibrated
+against the server's **own** `prompt_tokens`, which is what caught two harness bugs
+during this re-run — a hand-estimated chars/token asked for 160k and got 70,901, and
+an unsalted prompt would have been served from the GPU prefix cache and skipped the
+`_build_store_jobs` path entirely. Both would have "passed" while testing nothing.
+That is why `kv-ladder.py` records `in_range` per cell and fails a cell whose token
+count is off, and why every rep carries a unique prefix salt.
+
+Signature 2 (`DEVICE_LOST` + xe GUC job timeout) is **not** claimed fixed: the fix is
+a Python scheduler bound, and 2 of the 3 pre-fix deaths were signature 2, so 6 clean
+cells are real evidence about signature 1 and weaker evidence about signature 2. See
+"What is still not established".
 
 ## What was falsified (recorded so it is not re-litigated)
 

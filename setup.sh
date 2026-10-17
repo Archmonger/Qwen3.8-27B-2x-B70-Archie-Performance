@@ -357,6 +357,72 @@ else
   die "image $IMAGE cannot load libze_intel_gpu.so.1 -- the Dockerfile overlay did not apply, or the base/driver tags moved"
 fi
 
+# Attest the KV-offload hotfix (vllm-project/vllm#52923) is in the image we are
+# about to start, not merely in the Dockerfile.
+#
+# Why a check at all: the build above is skipped whenever the tag already exists, so
+# editing image/Dockerfile does not touch an existing image. `./setup.sh` on such a
+# box happily reuses an image built BEFORE the hotfix, and nothing else here would
+# notice -- the engine boots, /health answers 200, and the offloading connector
+# AssertionError is waiting for the first long request. Check the running image's own
+# bytes instead of inferring them from the Dockerfile on disk.
+#
+# The probe itself lives in scripts/lib/kv-patch.sh so that
+# scripts/falsify/kv-patch-cases.sh exercises the same code this gate runs --
+# the reason attest.sh was extracted too.
+#
+# Severity follows the config, because that is what decides whether the defect is
+# reachable at all: with KV_OFFLOAD_SIZE=0 the connector is never constructed, so an
+# unpatched image cannot fire the assert and is only worth a warning. With the tier on
+# it is fatal -- a crash here takes the whole engine down, and only at long context.
+# An UNKNOWN probe is treated like UNPATCHED: unable to prove the fix is present is
+# not the same as proving it is, and the tier-on branch is the one that can crash.
+. "$REPO/scripts/lib/kv-patch.sh"
+# `|| true` inside kv_attest, not `|| state=""`: the probe exits 2 when it cannot
+# run, and clearing the capture would throw away the output that explains why.
+kv_attest "$IMAGE" || true
+if [[ "$kv_patch_state" == "UNKNOWN" ]]; then
+  warn "KV-offload probe could not run against image $IMAGE; output was:"
+  tail -5 <<<"$kv_probe_out" | sed 's/^/[setup]          /' >&2
+fi
+# One severity decision, computed once and acted on below, so the rebuild condition
+# and the final gate cannot drift into two different tables.
+kv_sev=$(kv_severity "$kv_patch_state" "${KV_OFFLOAD_SIZE:-0}")
+
+# The hotfix is meant to apply itself, so an unpatched image with the tier on is a
+# reason to rebuild, not merely a reason to stop. --rebuild already forces this;
+# --no-build is an explicit "do not touch my images", so there we stop and say so
+# rather than quietly booting a pairing that will die on the first long request.
+if [[ "$kv_sev" == "fatal" && $DO_BUILD -eq 1 ]]; then
+  say "image $IMAGE is not patched for KV offload (probe said $kv_patch_state) and"
+  say "  KV_OFFLOAD_SIZE=${KV_OFFLOAD_SIZE} -> rebuilding it now with image/patches/kv-offload-52923.patch"
+  docker build -t "$IMAGE" "$REPO/image" || die "image build failed"
+  kv_attest "$IMAGE" || true
+  if [[ "$kv_patch_state" == "UNKNOWN" ]]; then
+    warn "KV-offload probe could not run after the rebuild; output was:"
+    tail -5 <<<"$kv_probe_out" | sed 's/^/[setup]          /' >&2
+  fi
+  kv_sev=$(kv_severity "$kv_patch_state" "${KV_OFFLOAD_SIZE:-0}")
+fi
+
+case "$kv_sev" in
+  ok)
+    say "ok      in-image KV-offload hotfix present (vllm#52923)"
+    ;;
+  warn)
+    warn "image $IMAGE: vllm#52923 KV-offload hotfix not confirmed (probe said $kv_patch_state);"
+    warn "  harmless while KV_OFFLOAD_SIZE=0 (the offloading connector is never built)."
+    warn "  Rebuild before enabling the tier: ./setup.sh --rebuild"
+    ;;
+  *)
+    say "FATAL: image $IMAGE: vllm#52923 KV-offload hotfix not confirmed (probe said"
+    say "       $kv_patch_state) and the host KV tier is enabled (KV_OFFLOAD_SIZE=${KV_OFFLOAD_SIZE})."
+    say "       That pairing is what kills EngineCore on a long request -- see"
+    say "       docs/kv-offload-defect.md."
+    die "rebuild the patched image: ./setup.sh --rebuild"
+    ;;
+esac
+
 # ---------------------------------------------------------------------------
 # Runstate: the filtered by-path directory + cache dirs
 # ---------------------------------------------------------------------------

@@ -27,6 +27,11 @@ WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 WANT_CEIL=80
 WANT_K=7
 WANT_KV=fp8
+# Matches profiles/fp8/fp8.env's KV_OFFLOAD_SIZE. Stated, not left blank: the tier
+# is attested in both directions, and "0" is an intent rather than an absence of
+# one. The cases below cover both, including the wanted-0 direction that can only
+# be proven by the key being ABSENT from the engine's own config dump.
+WANT_OFF=50
 
 # The fixture is a Python-dict config dump in the shape vLLM actually prints: keys
 # carrying a trailing quote, `<CUDAGraphMode.X: (n, n)>`, a closing brace on the last
@@ -35,18 +40,27 @@ WANT_KV=fp8
 # how an attestation ends up checking nothing and reporting success. This fixture was
 # transcribed from a real engine log; the CONTAINER= cross-check below is what keeps
 # it honest. If you hand-edit this fixture, run that check.
+#
+# The non-default-args line carries only what the `off` rule reads. The real banner
+# also prints kv_cache_dtype there, and reproducing it is a trap: the `kv` rule
+# matches `cache_dtype': 'fp8'` OR a kv_cache-prefixed spelling, the kv-auto case
+# mutates only the FIRST occurrence, and so a second occurrence anywhere in the
+# fixture leaves the rule still matching -- a case that reports a mutation the
+# engine would never have accepted. That is exactly what happened when this line
+# was first added, and the harness flagged it as "this verdict path cannot fail".
 write_good() {
   cat > "$1" <<'EOF'
 INFO CompilationConfig(mode='none', cudagraph_mode': <CUDAGraphMode.FULL_DECODE_ONLY: (2, 2)>, max_cudagraph_capture_size': 80, cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80])
 INFO SpeculativeConfig(method': 'dspark', model': '/models/drafter', num_speculative_tokens': 7}
 INFO CacheConfig(cache_dtype': 'fp8')
+INFO non-default args: {'kv_offloading_size': 50.0, 'max_num_seqs': 10}
 INFO Using V2 Model Runner
 INFO Graph capturing finished in 6 secs, took 0.58 GiB
 EOF
 }
 
 verdict_of() { # $1=log $2=rule-name -> ok|bad|<empty>
-  attest "$1" "$WANT_CEIL" "$WANT_K" "$WANT_KV" | awk -F'|' -v n="$2" '$2==n{print $3}'
+  attest "$1" "$WANT_CEIL" "$WANT_K" "$WANT_KV" "$WANT_OFF" | awk -F'|' -v n="$2" '$2==n{print $3}'
 }
 
 fails=0
@@ -54,7 +68,7 @@ fails=0
 # --- baseline: the clean log must be entirely clean. Without this, a case that
 #     appears to discriminate because the baseline itself is broken means nothing.
 write_good "$WORK/good.log"
-badlines=$(attest "$WORK/good.log" "$WANT_CEIL" "$WANT_K" "$WANT_KV" | awk -F'|' '$3=="bad"')
+badlines=$(attest "$WORK/good.log" "$WANT_CEIL" "$WANT_K" "$WANT_KV" "$WANT_OFF" | awk -F'|' '$3=="bad"')
 if [[ -n "$badlines" ]]; then
   echo "FAIL baseline: the clean fixture is not clean, so no case below means anything"
   echo "$badlines" | sed 's/^/       /'
@@ -66,9 +80,9 @@ echo "ok   baseline: clean fixture yields no bad verdicts"
 # --- empty log: every rule must report bad. Refusing to score an aggregate over
 #     zero rows is the guard an earlier harness of this project lacked.
 : > "$WORK/empty.log"
-if attest "$WORK/empty.log" "$WANT_CEIL" "$WANT_K" "$WANT_KV" | grep -q '|ok|'; then
+if attest "$WORK/empty.log" "$WANT_CEIL" "$WANT_K" "$WANT_KV" "$WANT_OFF" | grep -q '|ok|'; then
   echo "FAIL empty log produced an 'ok' verdict:"
-  attest "$WORK/empty.log" "$WANT_CEIL" "$WANT_K" "$WANT_KV" | grep '|ok|' | sed 's/^/       /'
+  attest "$WORK/empty.log" "$WANT_CEIL" "$WANT_K" "$WANT_KV" "$WANT_OFF" | grep '|ok|' | sed 's/^/       /'
   fails=$((fails+1))
 else
   echo "ok   empty-log case: every rule reports bad"
@@ -89,6 +103,14 @@ cases=(
   "traceback           |Using V2 Model Runner|Traceback (most recent call last):|fatal"
   "v1-runner           |Using V2 Model Runner|Using V1 Model Runner|v2"
   "kv-auto             |cache_dtype': 'fp8'|cache_dtype': 'auto'|kv"
+  # Host KV tier, wanted 50. Absent is the important one: vLLM omits the key
+  # entirely when the flag was never passed, so a rule that only compared numbers
+  # would read "absent" as no-op instead of as the tier being off.
+  "tier-absent         |'kv_offloading_size': 50.0, |$REMOVED|off"
+  "tier-25             |'kv_offloading_size': 50.0|'kv_offloading_size': 25.0|off"
+  # 0.0 is tier-ON with a zero-byte store, not tier-off: config/vllm.py returns
+  # early only on None. Wanting 50 and getting 0.0 must fail.
+  "tier-zero           |'kv_offloading_size': 50.0|'kv_offloading_size': 0.0|off"
 )
 
 for c in "${cases[@]}"; do
@@ -125,10 +147,56 @@ PY
   fi
 done
 
+# --- the tier rule's other direction: wanted OFF.
+#
+# The table above can only ever vary the fixture, so it proves "wanted 50 and got
+# something else" fails. It cannot prove the reverse, and the reverse is the
+# failure that bites when someone flips profiles/fp8 back to KV_OFFLOAD_SIZE=0:
+# the engine must then NOT have the key at all. Absence is the only evidence, and
+# an `if [[ -n "$off" ]]`-shaped rule gets that direction backwards -- it skips the
+# check and reports clean. These cases are what make that shape impossible.
+echo
+echo "=== host KV tier, wanted 0 ==="
+KEEP='<<NO-MUTATION>>'   # $REMOVED deletes the key; a case can also want it intact
+tier_case() { # $1=name $2=fixture-line-variant $3=want $4=want-verdict
+  local name="$1" line="$2" want="$3" wantv="$4" v
+  write_good "$WORK/t.log"
+  if [[ "$line" != "$KEEP" ]]; then
+    local anchor="'kv_offloading_size': 50.0"
+    # Deleting the key needs the trailing ", " in the anchor as well, or the
+    # substitution leaves a dangling comma in the dict repr.
+    if [[ "$line" == "$REMOVED" ]]; then anchor="'kv_offloading_size': 50.0, "; fi
+    if ! A="$anchor" R="$line" F="$WORK/t.log" python3 - <<'PY'
+import os, sys
+p = os.environ["F"]; s = open(p).read(); a, r = os.environ["A"], os.environ["R"]
+if a not in s: sys.exit("anchor absent: %r" % a)
+open(p, "w").write(s.replace(a, r, 1))
+PY
+    then
+      echo "FAIL $name: fixture lacks the anchor '$anchor' -- broken, not passing"
+      fails=$((fails+1)); return
+    fi
+  fi
+  v=$(attest "$WORK/t.log" "$WANT_CEIL" "$WANT_K" "$WANT_KV" "$want" \
+        | awk -F'|' '$2=="off"{print $3}')
+  if [[ "$v" == "$wantv" ]]; then
+    echo "ok   $name -> off=$v (wanted size $want)"
+  else
+    echo "FAIL $name: off verdict '${v:-none}', wanted $wantv (wanted size $want)"
+    fails=$((fails+1))
+  fi
+}
+tier_case "off: absent, wanted 0      " "$REMOVED"                     0   ok
+tier_case "off: 0.0 present, want 0   " "'kv_offloading_size': 0.0"    0   bad
+tier_case "off: 50.0 present, want 0  " "'kv_offloading_size': 50.0"   0   bad
+tier_case "on:  50.0 present, want 50 " "$KEEP"                        50  ok
+tier_case "on:  50 present, want 50   " "'kv_offloading_size': 50"     50  ok
+tier_case "on:  75.0 present, want 50 " "'kv_offloading_size': 75.0"   50  bad
+
 # --- labels must cover exactly the rules attest emits, or verify.sh silently drops
 #     a verdict (or invents one).
-rules_emitted=$(attest "$WORK/good.log" "$WANT_CEIL" "$WANT_K" "$WANT_KV" | awk -F'|' '{print $2}' | sort -u)
-rules_labelled=$(attest_labels "$WANT_CEIL" "$WANT_K" "$WANT_KV" | awk -F'|' '{print $2}' | sort -u)
+rules_emitted=$(attest "$WORK/good.log" "$WANT_CEIL" "$WANT_K" "$WANT_KV" "$WANT_OFF" | awk -F'|' '{print $2}' | sort -u)
+rules_labelled=$(attest_labels "$WANT_CEIL" "$WANT_K" "$WANT_KV" "$WANT_OFF" | awk -F'|' '{print $2}' | sort -u)
 if [[ "$rules_emitted" != "$rules_labelled" ]]; then
   echo "FAIL attest and attest_labels disagree:"
   diff <(echo "$rules_emitted") <(echo "$rules_labelled") | sed 's/^/       /'
@@ -271,7 +339,7 @@ if [[ -n "${CONTAINER:-}" ]] && command -v docker >/dev/null 2>&1 \
   if [[ ! -s "$WORK/live.log" ]]; then
     echo "SKIP live cross-check: no logs for $CONTAINER"
   else
-    attest "$WORK/live.log" "$WANT_CEIL" "$WANT_K" "$WANT_KV" > "$WORK/live.verdicts"
+    attest "$WORK/live.log" "$WANT_CEIL" "$WANT_K" "$WANT_KV" "$WANT_OFF" > "$WORK/live.verdicts"
     if awk -F'|' '$3=="bad"' "$WORK/live.verdicts" | grep -q .; then
       echo "NOTE live cross-check: the real engine disagrees with the fixture expectations"
       awk -F'|' '$3=="bad"{print "       "$2": "$4}' "$WORK/live.verdicts"

@@ -90,8 +90,14 @@ fi
 echo "[2/5] config attestation (engine's own log, not the env file)"
 want_ceil=$(( ${MAX_NUM_SEQS:-10} * (1 + ${NUM_SPEC_TOKENS:-7}) ))
 want_k="${NUM_SPEC_TOKENS:-}"; want_kv="${KV_CACHE_DTYPE:-}"
-attest "$LOG" "$want_ceil" "$want_k" "$want_kv" > "$WORK/verdicts" 2>/dev/null
-attest_labels "$want_ceil" "$want_k" "$want_kv" > "$WORK/labels"
+# The host KV tier is attested in both directions, and always stated: "0" is an
+# intent (the launcher default), not an absence of one. This is the check that
+# catches the create-time trap in docs/configuration.md -- the value is baked into
+# Config.Env when the container is CREATED, so an edited profile plus a mere
+# `docker restart` leaves the engine on the OLD tier and everything else green.
+want_off="${KV_OFFLOAD_SIZE:-0}"
+attest "$LOG" "$want_ceil" "$want_k" "$want_kv" "$want_off" > "$WORK/verdicts" 2>/dev/null
+attest_labels "$want_ceil" "$want_k" "$want_kv" "$want_off" > "$WORK/labels"
 # Join on the rule name. A rule with a verdict but no label (or vice versa) is a
 # harness edit that only half landed, so it is reported rather than dropped.
 while IFS='|' read -r _ name verdict detail; do

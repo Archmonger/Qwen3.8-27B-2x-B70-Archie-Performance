@@ -124,11 +124,17 @@ TP_SIZE="${TP_SIZE:-2}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-10}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.92}"
-# Off by default. The host KV tier is not a performance knob on this deployment:
-# it never serves a read (kv_offload_cpu_cache_read_usage_perc stays 0.0 and the
-# external prefix-cache hit rate stays 0.0% across every boot measured) while
-# reserving a host store of this size, and at long context the connector takes the
-# whole engine down. See docs/kv-offload-defect.md before turning it back on.
+# Off by default, which is the safe thing to ship rather than a verdict on the tier:
+# it is not a performance knob on this deployment (it never serves a read --
+# kv_offload_cpu_cache_read_usage_perc and the external prefix-cache hit rate both
+# stay 0.0 across every boot measured) and it consumes host RAM proportional to use,
+# so a launcher-wide default of "on" would cost RAM and buy nothing. profiles/fp8
+# opts in at 50 GB deliberately, where the capacity is wanted.
+#
+# A non-zero value here is only safe on an image carrying the vllm#52923 KV-offload
+# hotfix (image/patches/); without it, a single long request kills EngineCore with an
+# AssertionError in offloading/scheduler.py. setup.sh attests the pairing and refuses
+# to start an unpatched image with the tier on. See docs/kv-offload-defect.md.
 KV_OFFLOAD_SIZE="${KV_OFFLOAD_SIZE:-0}"
 
 # --- Speculative decoding.

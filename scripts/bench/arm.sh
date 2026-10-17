@@ -179,6 +179,15 @@ DRAFTER_SRC=$DRAFTER_DIR
 # value. An explicit MAMBA_SSM=... argument still wins below, and MAMBA_SSM=auto
 # restores the omitted-flag control arm.
 DTYPE=${DTYPE:-}; MAMBA_SSM=${MAMBA_SSM_CACHE_DTYPE:-}; KVDT=${KV_CACHE_DTYPE:-fp8}
+# The host KV tier is seeded from the profile for the same reason, and it matters
+# now that profiles/fp8/fp8.env turns the tier ON: nothing on the docker line
+# passed KV_OFFLOAD_SIZE, so serve.sh fell back to its own default of 0 and EVERY
+# arm booted tier-off while production booted tier-on. Arm numbers would then have
+# been tier-off numbers labelled as the shipping config -- and a KV_OFFLOAD_SIZE=
+# arm argument landing in PASS_ENV would have looked like it varied something
+# while the attestation said nothing either way. Seeding keeps the arm, the row
+# stamp, and the `off` attestation all reading the value the container got.
+KV_OFF=${KV_OFFLOAD_SIZE:-0}
 # Arm-only, like MAMBA_SSM/NEEDLE: it names what an unpinned arm is expected to
 # resolve to, so the container has no use for it and it must not ride along in
 # PASS_ENV as an env var nothing reads. Unlike MAMBA_SSM it is NOT cleared to empty
@@ -204,6 +213,11 @@ for kv in "$@"; do
     DTYPE_AUTO_EXPECT=*) DTYPE_AUTO_EXPECT=${kv#*=} ;;
     MAMBA_SSM=*)     MAMBA_SSM=${kv#*=} ;;
     KVDT=*)          KVDT=${kv#*=} ;;
+    # Read here as well as seeded above, so a KV_OFFLOAD_SIZE=... arm argument
+    # changes the value the row is stamped with and the value the `off` rule
+    # asserts -- otherwise it would travel to the container through PASS_ENV and
+    # nothing on this side would know the arm varied.
+    KV_OFFLOAD_SIZE=*) KV_OFF=${kv#*=} ;;
     NEEDLE=*)        NEEDLE=${kv#*=} ;;
     NEEDLE_ABSENT=*) NEEDLE_ABSENT=${kv#*=} ;;
     PROBES=*)        PROBES=${kv#*=} ;;
@@ -370,13 +384,16 @@ if [[ "${ARM_CHECK_ONLY:-0}" == "1" ]]; then
   echo "arm: rig OK -- profile=$PROFILE image=$IMAGE port=$ARM_PORT"
   echo "     devices: ${GPU_NODES[*]}"
   echo "     by-path: $DRI_DIR/dri-by-path"
-  echo "     dtype=${DTYPE:-profile} ssm=${MAMBA_SSM:-profile} kv=$KVDT ceiling=$CEILING"
+  echo "     dtype=${DTYPE:-profile} ssm=${MAMBA_SSM:-profile} kv=$KVDT tier=${KV_OFF}GB ceiling=$CEILING"
   echo "     probes: ${PROBES:-none (unmodified image)}"
   echo "     output: $O"
   exit 0
 fi
 
-say "launch port=$ARM_PORT profile=$PROFILE dtype=${DTYPE:-profile} ssm=${MAMBA_SSM:-profile} kv=$KVDT ${PASS_ENV[*]:-}"
+# tier= is printed explicitly because the value is seeded from the profile, not
+# passed as an argument, so it would otherwise appear nowhere in the log while
+# still deciding whether OffloadingConnector ran at all.
+say "launch port=$ARM_PORT profile=$PROFILE dtype=${DTYPE:-profile} ssm=${MAMBA_SSM:-profile} kv=$KVDT tier=${KV_OFF}GB ${PASS_ENV[*]:-}"
 docker rm -f "$CTR" >/dev/null 2>&1
 sleep 3
 
@@ -398,6 +415,7 @@ timeout "${ARM_BOOT_TIMEOUT:-2700}" docker run -d --name "$CTR" \
   -e PREFIX_CACHE="${PREFIX_CACHE:-1}" -e COMPILE="${COMPILE:-1}" \
   -e XPU_GRAPH="${XPU_GRAPH:-1}" -e SPEC="${SPEC:-1}" \
   -e NUM_SPEC_TOKENS="${NUM_SPEC_TOKENS:-7}" -e KV_CACHE_DTYPE="$KVDT" \
+  -e KV_OFFLOAD_SIZE="$KV_OFF" \
   -e CCL_SYCL_ALLREDUCE_TMP_BUF="${CCL_SYCL_ALLREDUCE_TMP_BUF:-1}" \
   -e EXTRA_VLLM_ARGS="--compilation-config $CEIL_JSON" \
   "${ENVARGS[@]}" "${DTYPE_ENV[@]+"${DTYPE_ENV[@]}"}" \
@@ -472,7 +490,7 @@ if [[ -n "$PROBES" ]]; then
 fi
 
 # --- attestation (same rules the recorded table was gated on) ----------------
-if ! attest "$L" "$CEILING" "${NUM_SPEC_TOKENS:-7}" "$([[ $KVDT == auto ]] && echo "" || echo "$KVDT")"; then
+if ! attest "$L" "$CEILING" "${NUM_SPEC_TOKENS:-7}" "$([[ $KVDT == auto ]] && echo "" || echo "$KVDT")" "$KV_OFF"; then
   say "ABORT ATTESTATION"; row attest-failed; exit 1
 fi
 ceil=$(grep -oE "max_cudagraph_capture_size.: [0-9]+" "$L" | tail -1 | grep -oE "[0-9]+$")
