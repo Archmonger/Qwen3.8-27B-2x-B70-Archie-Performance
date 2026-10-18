@@ -90,15 +90,11 @@ Useful flags: `--profile` (`fp8` | `int4`), `--dry-run` (preflight + resolved pl
 changes nothing), `--rebuild`, `--no-start`, `--b70-bdfs`, `--models-dir`,
 `--cache-dir`, `--run-dir`. `-h` for all.
 
-`setup.sh` is idempotent and fails closed: it refuses to start the container if the
-graph ceiling does not equal `MAX_NUM_SEQS x (1 + NUM_SPEC_TOKENS)`, if a dynamic
-speculative schedule is set, if the drafter config is the unpatched upstream
-variant, if either PCI device is not bound to `xe`, or if the host KV tier is
-enabled (`KV_OFFLOAD_SIZE>0`) on an image that does not carry the ported
-[vllm#52923](https://github.com/vllm-project/vllm/pull/52923) hotfix — the pairing
-that kills `EngineCore` on a long request. When that last check fails and
-`--no-build` was not given, it rebuilds the image itself. See
-[kv-offload-defect.md](docs/kv-offload-defect.md).
+`setup.sh` is idempotent and fails closed — it preflights the driver, PCI binding,
+model weights, drafter config, graph ceiling and KV-offload hotfix before it will
+start a container, and refuses rather than booting a configuration known to be
+broken. What each check verifies and why it exists is in
+[verification.md#what-setupsh-refuses-to-boot](docs/verification.md#what-setupsh-refuses-to-boot).
 
 To re-check a deployment that is already up — attestation, correctness, acceptance,
 serving surface, every guard's ability to fail, and a sustained-load soak — use the

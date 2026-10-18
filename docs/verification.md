@@ -26,6 +26,59 @@ check that cannot fail is worse than no check: it produces confidence.
 | ssm-cache engagement (rc 2 printed, never counted) | `--mamba-ssm-cache-dtype` reached the engine, proven by the config warning it emits when it disagrees with the checkpoint | the same drop for the recurrent-state dtype. A pin equal to the checkpoint's own `float32` is **unprovable** and returns 2, so an unprovable claim cannot be read as a verified one |
 | host KV tier: `kv_offloading_size` equals the **resolved** `KV_OFFLOAD_SIZE` (committed profile plus the gitignored `host.env` overlay, read through the same `load_host_overlay` `setup.sh` uses), checked in **both** directions, where `0` is an intent rather than a blank | the engine really has the tier at the size this box asked for — or really does not have it at all | the create-time trap in [configuration.md](configuration.md): the value is baked into `Config.Env` at container **create**, so an edited profile or overlay plus a `docker restart` leaves the engine on the old tier with everything else green. Sharing one loader with `setup.sh` is the point: with two copies of the rule, `verify.sh` could demand 0 from a container `setup.sh` created at 50 — a false FAIL — or, the other way round, agree with a boot it never read the same way and hand back a false PASS. vLLM omits the key entirely when the flag was never passed, so the off direction can only be proven by **absence**, which is the one shape a check written as `if [[ -n "$got" ]]` reports as clean. A reported `0.0` is a deliberate FAIL against a wanted `0`: the flag was passed, and `config/vllm.py` builds the connector for anything non-`None`, so it is a zero-byte store rather than tier-off |
 
+## What `setup.sh` refuses to boot
+
+`setup.sh` preflights before it touches the container, and every refusal names the
+check that failed rather than exiting 1 — several of these guards exist because the
+failure they now catch *looked like something else*. `--dry-run` runs the preflight
+and the compose render and changes nothing.
+
+| Refuses to boot when | why that check exists |
+|---|---|
+| profile is `int4` | exits 3 with an explanation before any build or start: `profiles/int4/` holds no runnable config, so nothing unverified can come up from this repo |
+| the profile env file is missing, or the host env overlay is invalid | the overlay may set **only** `KV_OFFLOAD_SIZE`, only numerically — any other key or a non-numeric value exits 2 — and a file named by `KV_HOST_ENV` that does not exist is a hard failure rather than a silent fall back to the committed `0` |
+| `python3` is not on `PATH` | the drafter-config and graph-ceiling gates are Python; without it both would pass by not running |
+| `B70_BDFS` does not list exactly two well-formed PCI BDFs | one GPU serving TP2 presents as a slow boot, not as a misconfiguration |
+| either BDF is not bound to `xe`, or its `by-path` symlink is missing | otherwise it resurfaces later as a "broken driver overlay". The check reads the `driver` symlink with `readlink`, never `cat`: `driver` is a symlink to a *directory*, so `cat` exits non-zero and reports a healthy card as `none` |
+| both BDFs resolve to the same card | two workers on one GPU — an OOM far from its cause, blamed on rank 1 |
+| the target model dir or a required file is missing, or fewer than 60 safetensors shards are present | an interrupted download otherwise boots a model that cannot load |
+| the drafter dir or its `model.safetensors` is missing | same failure one stage later |
+| the drafter `config.json` is the unpatched upstream variant | the published drafter ships `architectures: DSparkDraftModel` plus `auto_map`, which on 0.26 resolves to no registry entry — startup dies with `Model architectures ['DSparkDraftModel'] are not supported for now`. `setup.sh` applies `profiles/fp8/model-patches/drafter-config.json` (`Qwen3DSparkModel`, `auto_map` removed) and refuses to start while it is still upstream, so the failure is named here instead of surfacing during weight load |
+| the drafter `config.json` differs from the expected patched config in any field | a field-by-field diff, so a near-miss edit that changes the draft width cannot pass a "looks patched" heuristic |
+| `max_cudagraph_capture_size` does not equal `MAX_NUM_SEQS x (1 + NUM_SPEC_TOKENS)` — including a value set inside `EXTRA_VLLM_ARGS` | the 72-vs-80 defect: a ceiling below the saturated batch runs the saturated batch eager, and the only symptom is a tok/s shortfall |
+| `SPEC_TOKENS_SCHEDULE` is set | with graphs on it garbles output (6–13/30 correct) while the acceptance counters stay healthy — the check that should have caught it did not |
+| the compose file does not render, renders an empty device node, or fails to mount the generated `by-path` dir | an interpolation failure is silent at `up` time |
+| the image is absent and `--no-build` was given | says which command to run instead of failing to start |
+| the in-image level-zero driver cannot load `libze_intel_gpu.so.1` | the Dockerfile's driver overlay did not apply, or the base/driver tags moved. Probed with the venv activated on purpose: an un-activated probe dies with "Failed to infer device type", which is indistinguishable from a genuinely broken driver |
+| the image lacks the ported [vllm#52923](https://github.com/vllm-project/vllm/pull/52923) hotfix **and** the host KV tier is enabled | fatal, and unless `--no-build` was given it rebuilds the image itself before proceeding. See [kv-offload-defect.md](kv-offload-defect.md) |
+| the container is in a bad state, or no `/health` on `PORT` within the boot timeout | `up -d` returns at create, roughly 200 s before the weights are loaded |
+| `scripts/verify.sh` fails | the deployment is not treated as up until post-boot attestation passes |
+
+Severity on the hotfix gate follows the **config**, because that is what decides
+whether the defect is reachable: with the resolved `KV_OFFLOAD_SIZE=0` the offloading
+connector is never constructed, so an unpatched image cannot fire the assert and only
+warrants a warning; with the tier on it is fatal, since the crash takes the whole
+engine down and only at long context. A probe that cannot run is classified
+`UNKNOWN` and treated as `UNPATCHED` — unable to prove the fix is present is not the
+same as proving it is. The gate probes the **image's own bytes**, never the
+`Dockerfile` on disk, because the build is skipped whenever the tag already exists
+and `./setup.sh` would otherwise happily reuse a pre-hotfix image.
+
+Three conditions **warn** rather than stop, deliberately:
+
+- `SPEC_METHOD` other than `dspark` — `dflash` cannot boot with this drafter, but the
+  operator may be pointing at a different model dir.
+- An unpatched drafter config under `--dry-run` — a dry run must not be made to fail
+  on a state it is about to fix.
+- A container **created** with a non-zero host KV tier that is about to be recreated
+  at `0`. This is the `host.env`-vanished tripwire: the file is gitignored, so
+  `git clean -fdx` deletes it, `setup.sh` and `verify.sh` would both read the same
+  missing file and agree with each other, and the box would drop the tier with every
+  check green. It cannot be a hard stop — removing the overlay on purpose, to turn
+  the tier off, produces an identical signature, and only the operator knows which
+  one this is. It is said at the one moment the old value still exists to compare
+  against, and names the file to recreate.
+
 ## Prove your tests can fail
 
 `scripts/falsify/run-all.sh` drives every guard with inputs that must make it fail:
