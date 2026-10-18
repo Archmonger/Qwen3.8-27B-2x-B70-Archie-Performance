@@ -22,6 +22,15 @@ cp "$ENVF" "$BK"
 restore() { cp "$BK" "$ENVF"; }
 trap restore EXIT
 
+# Disable the host KV-tier overlay for the whole harness. These cases mutate the
+# profile and expect setup.sh to read exactly what was written; a developer's own
+# profiles/fp8/host.env is not rewritten by any mutation here, so it would
+# silently win over the profile for KV_OFFLOAD_SIZE and every case would run
+# under a tier its author did not choose. Empty string means "no overlay" --
+# distinct from unset, which means "use the default path".
+# See scripts/lib/profile-env.sh.
+export KV_HOST_ENV=""
+
 fails=0
 run_case(){ # $1=name $2=expect(fire|pass|warn) $3=pattern $4=mutate-function
   local name="$1" mode="$2" pat="$3" fn="$4" out rc first_fatal

@@ -116,6 +116,12 @@ esac
 # it parses rather than sources.
 . "$REPO/scripts/lib/profile-env.sh"
 load_env_file "$ENV_FILE"
+# Host-only KV tier override, applied after the profile and before the CLI so the
+# precedence is profile < host.env < CLI. The same file is handed to compose below,
+# which is what keeps the value this script attests and the value baked into the
+# container's Config.Env a single value rather than two. Restricted to one key by
+# design -- see scripts/lib/profile-env.sh.
+load_host_overlay "$ENV_FILE" || die "host env overlay is invalid (see above)"
 
 # CLI wins over the env file.
 [[ -n "${_CLI_MODELS_DIR:-}"    ]] && MODELS_DIR="$_CLI_MODELS_DIR"
@@ -291,6 +297,27 @@ fi
 # invocation here as the README documents for the manual path means a broken
 # devices.env generation fails at this check instead of at container creation.
 compose_files=(--env-file "$ENV_FILE")
+# A third env file when the host carries one, appended HERE rather than at the
+# start path: the --dry-run branch below exits before that point, so appending it
+# there would make the dry run render KV_OFFLOAD_SIZE from the committed profile
+# while the real start used the host value -- two answers to one question, and the
+# render check would then attest a config that never ships. Compose takes the LAST
+# file that defines a key, and devices.env defines none that this one does.
+# A missing file must not be passed: docker compose hard-fails on it.
+if HOST_OVERLAY="$(host_overlay_path "$ENV_FILE")"; then
+  say "ok      host env overlay in force: $HOST_OVERLAY -> KV_OFFLOAD_SIZE=$KV_OFFLOAD_SIZE"
+  compose_files+=(--env-file "$HOST_OVERLAY")
+else
+  # Stated on every run, not only when an overlay exists. The value can disappear:
+  # host.env is gitignored, so `git clean -fdx` deletes it, and a silent fall back
+  # to the committed 0 would leave a box running a different configuration while
+  # every check still passed -- setup.sh and verify.sh would both read the same
+  # missing file and agree with each other. Naming the resolved value, and that it
+  # came from the profile alone, is what makes that visible. No hint here about
+  # turning the tier on: this repo ships it off, and profiles/fp8/fp8.env plus
+  # docs/kv-offload-defect.md carry the tradeoffs for anyone who decides otherwise.
+  say "ok      no host env overlay; KV_OFFLOAD_SIZE=${KV_OFFLOAD_SIZE:-0} from $ENV_FILE"
+fi
 
 write_devices_env() { # $1=path
   {
@@ -357,6 +384,72 @@ else
   die "image $IMAGE cannot load libze_intel_gpu.so.1 -- the Dockerfile overlay did not apply, or the base/driver tags moved"
 fi
 
+# Attest the KV-offload hotfix (vllm-project/vllm#52923) is in the image we are
+# about to start, not merely in the Dockerfile.
+#
+# Why a check at all: the build above is skipped whenever the tag already exists, so
+# editing image/Dockerfile does not touch an existing image. `./setup.sh` on such a
+# box happily reuses an image built BEFORE the hotfix, and nothing else here would
+# notice -- the engine boots, /health answers 200, and the offloading connector
+# AssertionError is waiting for the first long request. Check the running image's own
+# bytes instead of inferring them from the Dockerfile on disk.
+#
+# The probe itself lives in scripts/lib/kv-patch.sh so that
+# scripts/falsify/kv-patch-cases.sh exercises the same code this gate runs --
+# the reason attest.sh was extracted too.
+#
+# Severity follows the config, because that is what decides whether the defect is
+# reachable at all: with KV_OFFLOAD_SIZE=0 the connector is never constructed, so an
+# unpatched image cannot fire the assert and is only worth a warning. With the tier on
+# it is fatal -- a crash here takes the whole engine down, and only at long context.
+# An UNKNOWN probe is treated like UNPATCHED: unable to prove the fix is present is
+# not the same as proving it is, and the tier-on branch is the one that can crash.
+. "$REPO/scripts/lib/kv-patch.sh"
+# `|| true` inside kv_attest, not `|| state=""`: the probe exits 2 when it cannot
+# run, and clearing the capture would throw away the output that explains why.
+kv_attest "$IMAGE" || true
+if [[ "$kv_patch_state" == "UNKNOWN" ]]; then
+  warn "KV-offload probe could not run against image $IMAGE; output was:"
+  tail -5 <<<"$kv_probe_out" | sed 's/^/[setup]          /' >&2
+fi
+# One severity decision, computed once and acted on below, so the rebuild condition
+# and the final gate cannot drift into two different tables.
+kv_sev=$(kv_severity "$kv_patch_state" "${KV_OFFLOAD_SIZE:-0}")
+
+# The hotfix is meant to apply itself, so an unpatched image with the tier on is a
+# reason to rebuild, not merely a reason to stop. --rebuild already forces this;
+# --no-build is an explicit "do not touch my images", so there we stop and say so
+# rather than quietly booting a pairing that will die on the first long request.
+if [[ "$kv_sev" == "fatal" && $DO_BUILD -eq 1 ]]; then
+  say "image $IMAGE is not patched for KV offload (probe said $kv_patch_state) and"
+  say "  KV_OFFLOAD_SIZE=${KV_OFFLOAD_SIZE} -> rebuilding it now with image/patches/kv-offload-52923.patch"
+  docker build -t "$IMAGE" "$REPO/image" || die "image build failed"
+  kv_attest "$IMAGE" || true
+  if [[ "$kv_patch_state" == "UNKNOWN" ]]; then
+    warn "KV-offload probe could not run after the rebuild; output was:"
+    tail -5 <<<"$kv_probe_out" | sed 's/^/[setup]          /' >&2
+  fi
+  kv_sev=$(kv_severity "$kv_patch_state" "${KV_OFFLOAD_SIZE:-0}")
+fi
+
+case "$kv_sev" in
+  ok)
+    say "ok      in-image KV-offload hotfix present (vllm#52923)"
+    ;;
+  warn)
+    warn "image $IMAGE: vllm#52923 KV-offload hotfix not confirmed (probe said $kv_patch_state);"
+    warn "  harmless while KV_OFFLOAD_SIZE=0 (the offloading connector is never built)."
+    warn "  Rebuild before enabling the tier: ./setup.sh --rebuild"
+    ;;
+  *)
+    say "FATAL: image $IMAGE: vllm#52923 KV-offload hotfix not confirmed (probe said"
+    say "       $kv_patch_state) and the host KV tier is enabled (KV_OFFLOAD_SIZE=${KV_OFFLOAD_SIZE})."
+    say "       That pairing is what kills EngineCore on a long request -- see"
+    say "       docs/kv-offload-defect.md."
+    die "rebuild the patched image: ./setup.sh --rebuild"
+    ;;
+esac
+
 # ---------------------------------------------------------------------------
 # Runstate: the filtered by-path directory + cache dirs
 # ---------------------------------------------------------------------------
@@ -412,6 +505,26 @@ if [[ $DO_START -eq 1 ]]; then
   # "Free memory on device xpu:1 ... less than desired" / OUT_OF_RESOURCES, which
   # reads like a VRAM problem and is not one.
   if docker ps -a --format '{{.Names}}' | grep -qx "$CTR"; then
+    # Tier drift, said BEFORE the old container is destroyed. Nothing in this
+    # repository sets the tier non-zero, so the only way a running container can
+    # have a non-zero KV_OFFLOAD_SIZE baked in is that it was created from a
+    # host.env overlay -- and if the resolved value is now 0, that overlay is gone
+    # (typically `git clean -fdx`, which deletes gitignored files). Silently
+    # recreating at 0 would then leave this box on a different configuration while
+    # verify.sh still passed, because verify.sh reads the same missing file and
+    # agrees. Not a hard stop: removing the overlay deliberately, to turn the tier
+    # off, produces the identical signature, and only the operator knows which
+    # this is. Said at the one moment the old value still exists to be compared.
+    prev_tier=$(docker inspect --format '{{json .Config.Env}}' "$CTR" 2>/dev/null \
+      | tr ',' '\n' | grep -oE 'KV_OFFLOAD_SIZE=[0-9.]+' | tail -1 | cut -d= -f2)
+    if [[ -n "${prev_tier:-}" && "${prev_tier}" != "0" \
+          && "${KV_OFFLOAD_SIZE:-0}" == "0" ]]; then
+      warn "container $CTR was CREATED with KV_OFFLOAD_SIZE=$prev_tier but the"
+      warn "  resolved value is now 0 -- the host.env overlay is missing, so this"
+      warn "  recreate will DROP the host KV tier. If that is not what you intended:"
+      warn "  create $(dirname "$ENV_FILE")/host.env containing KV_OFFLOAD_SIZE=$prev_tier"
+      warn "  and re-run. If it IS what you intended, this is expected."
+    fi
     say "removing existing container $CTR"
     docker rm -f "$CTR" >/dev/null 2>&1 || die "could not remove $CTR"
   fi

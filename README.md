@@ -90,10 +90,11 @@ Useful flags: `--profile` (`fp8` | `int4`), `--dry-run` (preflight + resolved pl
 changes nothing), `--rebuild`, `--no-start`, `--b70-bdfs`, `--models-dir`,
 `--cache-dir`, `--run-dir`. `-h` for all.
 
-`setup.sh` is idempotent and fails closed: it refuses to start the container if the
-graph ceiling does not equal `MAX_NUM_SEQS x (1 + NUM_SPEC_TOKENS)`, if a dynamic
-speculative schedule is set, if the drafter config is the unpatched upstream
-variant, or if either PCI device is not bound to `xe`.
+`setup.sh` is idempotent and fails closed — it preflights the driver, PCI binding,
+model weights, drafter config, graph ceiling and KV-offload hotfix before it will
+start a container, and refuses rather than booting a configuration known to be
+broken. What each check verifies and why it exists is in
+[verification.md#what-setupsh-refuses-to-boot](docs/verification.md#what-setupsh-refuses-to-boot).
 
 To re-check a deployment that is already up — attestation, correctness, acceptance,
 serving surface, every guard's ability to fail, and a sustained-load soak — use the
@@ -162,8 +163,9 @@ command block and explanation in
 | [docs/configuration.md](docs/configuration.md) | the whole measured config: pinned image + digests, model/KV quantization, patches, runtime flags, env vars, serve knobs, container and devices |
 | [docs/recorded-metrics.md](docs/recorded-metrics.md) | every measurement the README does not show: acceptance, correctness, surface, graph capture, soak, the single-stream probes, the realistic suite |
 | [docs/measurement-notes.md](docs/measurement-notes.md) | how to read the metrics table: where each recording comes from, why the prefill rate is a slope, the `max_tokens` mismatch, spread, eras, and the third-party numbers that are not parity targets |
-| [docs/verification.md](docs/verification.md) | what each check proves, and the harness bugs that misreported healthy engines |
+| [docs/verification.md](docs/verification.md) | what each check proves, what `setup.sh` refuses to boot, and the harness bugs that misreported healthy engines |
 | [docs/cudagraph-stride-defect.md](docs/cudagraph-stride-defect.md) | the graphs x DSpark defect, six falsified theories, the rejected patch, and the ceiling bug |
+| [docs/kv-offload-defect.md](docs/kv-offload-defect.md) | the long-context engine death and the ported vllm#52923 hotfix that fixes it, why the host KV tier ships **off** everywhere in this repo and how a single box opts in, and the falsified VRAM/ECC detours |
 | [docs/driver-overlay.md](docs/driver-overlay.md) | why the image is rebuilt from the pinned base |
 | [docs/dri-by-path.md](docs/dri-by-path.md) | the filtered DRM directory, and the two failure modes it prevents |
 | [docs/oneccl-and-p2p.md](docs/oneccl-and-p2p.md) | the IPC-handle wedge, the one knob that mitigates it, and why no-P2P cannot start here |

@@ -124,7 +124,23 @@ TP_SIZE="${TP_SIZE:-2}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-10}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.92}"
-KV_OFFLOAD_SIZE="${KV_OFFLOAD_SIZE:-50}"
+# Off by default, which is the safe thing to ship rather than a verdict on the tier:
+# it is not a performance knob on this deployment (it never serves a read --
+# kv_offload_cpu_cache_read_usage_perc and the external prefix-cache hit rate both
+# stay 0.0 across every boot measured) and it consumes host RAM proportional to use,
+# so a launcher-wide default of "on" would cost RAM and buy nothing. Nothing in
+# this repository sets it non-zero: profiles/fp8/fp8.env ships 0 too, and the one
+# box that wants the capacity sets it in the gitignored profiles/fp8/host.env,
+# which compose bakes into this container's environment at create. By the time
+# this line runs we are inside that container and cannot see the overlay -- the
+# value simply arrives, which is why the default here is a backstop and not the
+# thing anyone should expect to be relying on.
+#
+# A non-zero value here is only safe on an image carrying the vllm#52923 KV-offload
+# hotfix (image/patches/); without it, a single long request kills EngineCore with an
+# AssertionError in offloading/scheduler.py. setup.sh attests the pairing and refuses
+# to start an unpatched image with the tier on. See docs/kv-offload-defect.md.
+KV_OFFLOAD_SIZE="${KV_OFFLOAD_SIZE:-0}"
 
 # --- Speculative decoding.
 #
@@ -188,7 +204,10 @@ fi
 # KV_OFFLOAD_SIZE=0 omits --kv-offloading-size entirely; handing vLLM a literal
 # 0 is not the same as omitting the flag.
 KV_ARGS=()
-if [[ "${KV_OFFLOAD_SIZE:-50}" != "0" ]]; then
+# Test the resolved value from the assignment above, not a fresh ${VAR:-50}: the
+# two could disagree, and an empty value then passed the guard (empty -> 50) while
+# passing "$VAR" handed the parser a flag with no argument.
+if [[ "$KV_OFFLOAD_SIZE" != "0" ]]; then
   KV_ARGS+=(--kv-offloading-size "$KV_OFFLOAD_SIZE")
 fi
 
