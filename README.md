@@ -163,7 +163,7 @@ command block and explanation in
 | [docs/configuration.md](docs/configuration.md) | the whole measured config: pinned image + digests, model/KV quantization, patches, runtime flags, env vars, serve knobs, container and devices |
 | [docs/recorded-metrics.md](docs/recorded-metrics.md) | every measurement the README does not show: acceptance, correctness, surface, graph capture, soak, the single-stream probes, the realistic suite |
 | [docs/measurement-notes.md](docs/measurement-notes.md) | how to read the metrics table: where each recording comes from, why the prefill rate is a slope, the `max_tokens` mismatch, spread, eras, and the third-party numbers that are not parity targets |
-| [docs/verification.md](docs/verification.md) | what each check proves, and the harness bugs that misreported healthy engines |
+| [docs/verification.md](docs/verification.md) | what each check proves, what `setup.sh` refuses to boot, and the harness bugs that misreported healthy engines |
 | [docs/cudagraph-stride-defect.md](docs/cudagraph-stride-defect.md) | the graphs x DSpark defect, six falsified theories, the rejected patch, and the ceiling bug |
 | [docs/kv-offload-defect.md](docs/kv-offload-defect.md) | the long-context engine death and the ported vllm#52923 hotfix that fixes it, why the host KV tier ships **off** everywhere in this repo and how a single box opts in, and the falsified VRAM/ECC detours |
 | [docs/driver-overlay.md](docs/driver-overlay.md) | why the image is rebuilt from the pinned base |
