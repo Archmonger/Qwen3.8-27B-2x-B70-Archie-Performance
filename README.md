@@ -107,7 +107,7 @@ command block and explanation in
 > Target `Qwen/Qwen3.8-27B-FP8`, drafter `rwmacy/qwen3.8-27b-dflash-drafter-fp8-b70`, docker image `vllm-llmscaler:icr26.35` (vLLM `0.26.1.dev0+g568afb3a1.d20260907`), values are **median of 3 reps**.
 
 > [!WARNING]
-> Intel Arc Pro B70 [does **not** support](https://www.techpowerup.com/gpu-specs/arc-pro-b70.c4388) hardware native FP8 vector **or** matrix operations. As a result, this image has an upper bound on maximum performance. Despite this, my recipe has the fastest B70 8-bit metrics I've seen. Additionally, FP8 is the only low precision format provided directly by Alibaba.
+> Intel Arc Pro B70 [does **not** support](https://www.techpowerup.com/gpu-specs/arc-pro-b70.c4388) hardware native FP8 vector **or** matrix operations. As a result, this image has an upper bound on maximum performance. However, FP8 is the only low precision format provided directly by Alibaba.
 
 | Test Name | Concurrency | Tokens Generated | Value | Command |
 |---|---:|---:|---:|---|
